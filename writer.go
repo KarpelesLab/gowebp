@@ -44,11 +44,11 @@ type Options struct {
 //   - LoopCount: Number of times the animation should repeat; 0 means infinite looping.
 //   - BackgroundColor: Canvas background color in BGRA order, used for clear operations.
 type Animation struct {
-	Images              []image.Image
-	Durations           []uint
-	Disposals           []uint
-	LoopCount           uint16
-	BackgroundColor     uint32
+    Images              []image.Image
+    Durations           []uint
+    Disposals           []uint
+    LoopCount           uint16
+    BackgroundColor     uint32
 }
 
 // Encode writes the provided image.Image to the specified io.Writer in WebP format.
