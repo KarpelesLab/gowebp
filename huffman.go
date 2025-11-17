@@ -196,7 +196,13 @@ func writeFullhuffmanCode(w *bitWriter, codes []huffmanCode) {
 
     lengths := buildhuffmanCodes(histo, 7)
     for i := 0; i < cnt; i++ {
-        w.writeBits(uint64(lengths[lengthCodeOrder[i]].Depth), 3)
+        l := lengths[lengthCodeOrder[i]].Depth
+        if l < 0 {
+            w.writeBits(uint64(1), 3)
+            continue
+        }
+        
+        w.writeBits(uint64(l), 3)
     }
 
     w.writeBits(0, 1)
