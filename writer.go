@@ -17,19 +17,30 @@ import (
     //errors
     //------------------------------
     "errors"
+    //------------------------------
+    //vp8 (lossy)
+    //------------------------------
+    "github.com/HugoSmits86/nativewebp/internal/vp8enc"
 )
 
 // Options holds configuration settings for WebP encoding.
-//
-// Currently, it provides a flag to enable the extended WebP format (VP8X),
-// which allows for metadata support such as EXIF, ICC color profiles, and XMP.
 //
 // Fields:
 //   - UseExtendedFormat: If true, wraps the VP8L frame inside a VP8X container
 //     to enable metadata support. This does not affect image compression or
 //     encoding itself, as VP8L remains the encoding format.
+//   - Lossy: If true, encode as VP8 (lossy). Otherwise (default) encode as
+//     VP8L (lossless), preserving existing behavior byte-for-byte.
+//   - Quality: Lossy quality in [0, 100]. Higher values preserve more
+//     detail. Default (when zero) is 75. Ignored when Lossy is false.
+//   - Method: Lossy speed/quality tradeoff in [0, 6]. Higher values spend
+//     more time searching for better compression. Default 4. Ignored when
+//     Lossy is false.
 type Options struct {
     UseExtendedFormat   bool
+    Lossy               bool
+    Quality             float32
+    Method              int
 }
 
 // Animation holds configuration settings for WebP animations.
@@ -69,6 +80,10 @@ type Animation struct {
 // Returns:
 //   An error if encoding fails or writing to the io.Writer encounters an issue.
 func Encode(w io.Writer, img image.Image, o *Options) error {
+    if o != nil && o.Lossy {
+        return encodeLossy(w, img, o)
+    }
+
     stream, hasAlpha, err := writeBitStream(img)
     if err != nil {
         return err
@@ -91,6 +106,22 @@ func Encode(w io.Writer, img image.Image, o *Options) error {
     w.Write(buf.Bytes())
 
     return nil
+}
+
+// encodeLossy produces a VP8-coded .webp file. It wraps the VP8 frame in
+// the standard RIFF/WEBP/VP8 chunk structure. The current implementation
+// is the Phase B scaffolding: valid bitstream that decodes correctly but
+// does not yet perform mode selection or residual coding; those land in
+// subsequent phases.
+func encodeLossy(w io.Writer, img image.Image, o *Options) error {
+    q := o.Quality
+    if q == 0 {
+        q = 75
+    }
+    return vp8enc.EncodeWebP(w, img, vp8enc.EncodeOptions{
+        Quality: q,
+        Method:  o.Method,
+    })
 }
 
 // EncodeAll writes the provided animation sequence to the specified io.Writer in WebP format.
