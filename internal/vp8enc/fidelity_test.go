@@ -107,6 +107,8 @@ func TestEncodeNaturalContent(t *testing.T) {
 		{90, 2, 38},
 		{75, 2, 33},
 		{50, 2, 28},
+		{90, 4, 40}, // Method=4 reconstruction-RDO should match or
+		{75, 4, 34}, // exceed Method=2 quality on natural content.
 	}
 	for _, c := range cases {
 		var buf bytes.Buffer
