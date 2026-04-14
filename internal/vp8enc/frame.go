@@ -384,10 +384,27 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 	uvMode := s.pickUVMode(mbx, mby)
 
 	switch {
-	case s.opts.Method >= 3:
-		// Per-MB arbitration between I16 and B_PRED: pick lower SSE
-		// with a rate penalty that covers the extra mode-coding bits
-		// plus the loss of the compact Y2-WHT DC path on B_PRED MBs.
+	case s.opts.Method >= 4:
+		// Method 4+: per-MB arbitration using RD cost (reconstruction
+		// SSE + rate term) for I16. B_PRED is still estimated by
+		// prediction-only SSE (proper RDO for B_PRED would need
+		// 16 sub-block full encodes — deferred). Use the RD cost
+		// directly on the I16 side; pad the B_PRED side with the same
+		// mode-tree overhead penalty as Method=3.
+		yMode, i16Cost := s.bestI16RD(mbx, mby)
+		bSSE := s.estimateBPredSSE(mbx, mby)
+		qf := int64(s.quant.Y1[1])
+		bPenalty := qf * qf * 2
+		if i16Cost <= bSSE+bPenalty {
+			s.encodeI16MB(mbx, mby, yMode, uvMode)
+		} else {
+			s.encodeBPredMB(mbx, mby, uvMode)
+		}
+		return
+	case s.opts.Method == 3:
+		// Method 3: same arbitration as Method=4 but with the faster
+		// prediction-only SSE heuristic on the I16 side. Good default
+		// quality/speed tradeoff.
 		yMode, i16SSE := s.bestI16(mbx, mby)
 		bSSE := s.estimateBPredSSE(mbx, mby)
 		qf := int64(s.quant.Y1[1])
@@ -993,6 +1010,110 @@ func (s *encState) bestI16(mbx, mby int) (int, int64) {
 		}
 	}
 	return best, bestSSE
+}
+
+// bestI16RD is like bestI16 but computes cost as SSE of the actual
+// reconstructed MB (post-quantization). Each candidate mode runs the
+// full FDCT+WHT+quant+IDCT+IWHT pipeline, so this is significantly
+// slower than bestI16 but captures the quantization error that
+// prediction-only SSE misses.
+//
+// Used by Method >= 4. The rate-weighted RDO variant that also
+// considered sum(|q|) as a bit-cost proxy was removed because it
+// mis-calibrated at high Q where the proxy overweighted mode
+// decisions that actually produce identical reconstruction at fine
+// quantization. A proper rate estimator based on token-tree walk
+// against the probability model is future work.
+func (s *encState) bestI16RD(mbx, mby int) (int, int64) {
+	var top, left [16]byte
+	hasTop := s.getYTopRow(mbx, mby, &top)
+	hasLeft := s.getYLeftCol(mbx, mby, &left)
+	tl := s.getYTopLeft(mbx, mby)
+
+	var src [256]byte
+	for j := 0; j < 16; j++ {
+		for i := 0; i < 16; i++ {
+			src[j*16+i] = s.frame.Y[(mby*16+j)*s.frame.YStride+mbx*16+i]
+		}
+	}
+
+
+	bestMode := ModeDC
+	bestCost := int64(-1)
+	for _, m := range []int{ModeDC, ModeVE, ModeHE, ModeTM} {
+		var pred [256]byte
+		PredictI16(&pred, m, &top, &left, tl, hasTop, hasLeft)
+
+		// Per-sub-block residual + FDCT.
+		var yCoef [16][16]int16
+		for sby := 0; sby < 4; sby++ {
+			for sbx := 0; sbx < 4; sbx++ {
+				subIdx := sby*4 + sbx
+				var res [16]int16
+				for j := 0; j < 4; j++ {
+					for i := 0; i < 4; i++ {
+						p := int16(pred[(sby*4+j)*16+sbx*4+i])
+						sv := int16(src[(sby*4+j)*16+sbx*4+i])
+						res[j*4+i] = sv - p
+					}
+				}
+				FDCT4x4(res[:], yCoef[subIdx][:])
+			}
+		}
+
+		// Extract DC, WHT, quantize Y2.
+		var y2In, y2Coef, y2Q, y2DQ [16]int16
+		for k := 0; k < 16; k++ {
+			y2In[k] = yCoef[k][0]
+		}
+		FWHT4x4(y2In[:], y2Coef[:])
+		QuantizeBlockSplit(y2Coef[:], y2Q[:], y2DQ[:], s.quant.Y2[0], s.quant.Y2[1], 0, 0)
+
+		// Quantize Y1 AC.
+		var y1Q, y1DQ [16][16]int16
+		for k := 0; k < 16; k++ {
+			yCoef[k][0] = 0
+			QuantizeBlockSplit(yCoef[k][:], y1Q[k][:], y1DQ[k][:],
+				s.quant.Y1[0], s.quant.Y1[1], 0, int32(s.quant.Y1[1])/4)
+		}
+		_ = y1Q
+
+		// Reconstruct: IWHT → inject DC → IDCT per sub-block → + pred → clip.
+		var y2Rec [16]int16
+		IWHT4x4(y2DQ[:], y2Rec[:])
+		for k := 0; k < 16; k++ {
+			y1DQ[k][0] = y2Rec[k]
+		}
+		distortion := int64(0)
+		for sby := 0; sby < 4; sby++ {
+			for sbx := 0; sbx < 4; sbx++ {
+				subIdx := sby*4 + sbx
+				var resRec [16]int16
+				IDCT4x4(y1DQ[subIdx][:], resRec[:])
+				for j := 0; j < 4; j++ {
+					for i := 0; i < 4; i++ {
+						p := int32(pred[(sby*4+j)*16+sbx*4+i])
+						r := int32(resRec[j*4+i])
+						v := p + r
+						if v < 0 {
+							v = 0
+						}
+						if v > 255 {
+							v = 255
+						}
+						d := int32(src[(sby*4+j)*16+sbx*4+i]) - v
+						distortion += int64(d) * int64(d)
+					}
+				}
+			}
+		}
+
+		if bestCost < 0 || distortion < bestCost {
+			bestCost = distortion
+			bestMode = m
+		}
+	}
+	return bestMode, bestCost
 }
 
 // estimateBPredSSE approximates the total SSE of the best per-sub-block
