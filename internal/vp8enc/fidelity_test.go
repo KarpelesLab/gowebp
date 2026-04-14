@@ -81,6 +81,54 @@ func TestEncodePSNR(t *testing.T) {
 	}
 }
 
+// TestEncodeNaturalContent exercises the encoder on synthetic but
+// natural-ish content (spatial frequency + smooth gradients + color
+// variation) to validate it doesn't fall apart on realistic input.
+// Uses spec-correct Y-PSNR.
+func TestEncodeNaturalContent(t *testing.T) {
+	w, h := 128, 128
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			// Ramp + low-frequency wave + mild high-freq texture.
+			r := uint8((x*200/w + ((x^y)&7)*4) & 0xff)
+			g := uint8((y*180/h + ((x>>3)^(y>>3))&0x1f) & 0xff)
+			b := uint8(((x+y)*220/(w+h) + ((x*y)>>6)&0xf) & 0xff)
+			src.SetNRGBA(x, y, color.NRGBA{r, g, b, 255})
+		}
+	}
+	cases := []struct {
+		q        float32
+		m        int
+		minPSNRY float64
+	}{
+		{90, 2, 38},
+		{75, 2, 33},
+		{50, 2, 28},
+	}
+	for _, c := range cases {
+		var buf bytes.Buffer
+		if err := EncodeWebP(&buf, src, EncodeOptions{Quality: c.q, Method: c.m}); err != nil {
+			t.Fatalf("Q=%.0f M=%d: %v", c.q, c.m, err)
+		}
+		dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("Q=%.0f: decode %v", c.q, err)
+		}
+		ycbcr, ok := dec.(*image.YCbCr)
+		if !ok {
+			t.Fatalf("Q=%.0f: decoded is not YCbCr", c.q)
+		}
+		psnrY := computePSNRLimited(src, ycbcr)
+		t.Logf("natural 128x128 Q=%.0f M=%d: %d bytes, Y-PSNR=%.2f dB",
+			c.q, c.m, buf.Len(), psnrY)
+		if psnrY < c.minPSNRY {
+			t.Errorf("Q=%.0f: Y-PSNR %.2f dB < threshold %.2f dB",
+				c.q, psnrY, c.minPSNRY)
+		}
+	}
+}
+
 // TestBPredBeatsI16OnTexture verifies that on content with high spatial
 // detail the per-sub-block I4 modes (Method=2) produce equal or better
 // PSNR than the single-block I16 modes (Method=1).
