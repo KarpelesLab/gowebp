@@ -147,7 +147,7 @@ func encodeLossy(w io.Writer, img image.Image, o *Options) error {
 // Returns:
 //   An error if encoding fails or writing to the io.Writer encounters an issue.
 func EncodeAll(w io.Writer, ani *Animation, o *Options) error {
-    frames, alpha, err := writeFrames(ani)
+    frames, alpha, err := writeFrames(ani, o)
     if err != nil {
         return err
     }
@@ -201,7 +201,7 @@ func writeChunkVP8X(buf *bytes.Buffer, bounds image.Rectangle, flagAlpha, flagAn
     buf.Write([]byte{byte(dy), byte(dy >> 8), byte(dy >> 16)})
 }
 
-func writeFrames(ani *Animation) (*bytes.Buffer, bool, error) {
+func writeFrames(ani *Animation, o *Options) (*bytes.Buffer, bool, error) {
     if len(ani.Images) == 0 {
         return nil, false, errors.New("must provide at least one image")
     }
@@ -219,21 +219,60 @@ func writeFrames(ani *Animation) (*bytes.Buffer, bool, error) {
         ani.Disposals[i] = min(ani.Disposals[i], 1)
     }
 
+    lossy := o != nil && o.Lossy
+    quality := float32(75)
+    method := 0
+    if o != nil && o.Quality != 0 {
+        quality = o.Quality
+    }
+    if o != nil {
+        method = o.Method
+    }
+
     buf := &bytes.Buffer{}
-    
+
     var hasAlpha bool
     for i, img := range ani.Images {
-        stream, alpha, err := writeBitStream(img)
-        if err != nil {
-            return nil, false, err
+        var payload []byte
+        var alpha bool
+        var chunkFourCC []byte
+
+        if lossy {
+            var framebuf bytes.Buffer
+            if err := vp8enc.EncodeFrame(&framebuf, img, vp8enc.EncodeOptions{
+                Quality: quality,
+                Method:  method,
+            }); err != nil {
+                return nil, false, err
+            }
+            payload = framebuf.Bytes()
+            chunkFourCC = []byte("VP8 ")
+            // Lossy VP8 has no native alpha; we don't yet emit ALPH
+            // chunks for animations.
+            alpha = false
+        } else {
+            stream, a, err := writeBitStream(img)
+            if err != nil {
+                return nil, false, err
+            }
+            payload = stream.Bytes()
+            chunkFourCC = []byte("VP8L")
+            alpha = a
         }
-    
+
         hasAlpha = hasAlpha || alpha
+
+        // VP8/VP8L chunks inside ANMF must be even-length; pad with a
+        // zero byte when the payload length is odd.
+        paddedLen := len(payload)
+        if paddedLen&1 == 1 {
+            paddedLen++
+        }
 
         w := &bitWriter{Buffer: buf}
         w.writeBytes([]byte("ANMF"))
-        w.writeBits(uint64(16 + 8 + stream.Len()), 32)
-    
+        w.writeBits(uint64(16 + 8 + paddedLen), 32)
+
         // WebP specs requires frame offsets to be divided by 2
         w.writeBits(uint64(img.Bounds().Min.X / 2), 24)
         w.writeBits(uint64(img.Bounds().Min.Y / 2), 24)
@@ -246,9 +285,12 @@ func writeFrames(ani *Animation) (*bytes.Buffer, bool, error) {
         w.writeBits(uint64(0), 1)
         w.writeBits(uint64(0), 6)
     
-        w.writeBytes([]byte("VP8L"))
-        w.writeBits(uint64(stream.Len()), 32)
-        w.Buffer.Write(stream.Bytes())
+        w.writeBytes(chunkFourCC)
+        w.writeBits(uint64(len(payload)), 32)
+        w.Buffer.Write(payload)
+        if paddedLen != len(payload) {
+            w.Buffer.WriteByte(0)
+        }
     }
 
     return buf, hasAlpha, nil
