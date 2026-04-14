@@ -21,15 +21,40 @@ func WriteSegmentHeaderOff(e *BoolEncoder) {
 	e.WriteBit(0, UniformProb)
 }
 
-// WriteFilterHeaderOff emits a filter header with level=0 (disables the
-// loop filter entirely per RFC 6386 section 15):
+// WriteFilterHeader emits the loop-filter header:
+//   simple (1 bit) | level (6 bits) | sharpness (3 bits) | useLFDelta (1 bit)
 //
-//	simple=0, level=0, sharpness=0, useLFDelta=0
+// level=0 disables the filter entirely (RFC 6386 section 15). Otherwise
+// the decoder applies the normal filter (simple=false) or simple filter
+// (simple=true) to the reconstructed frame as a post-processing pass
+// that smooths block boundaries.
+func WriteFilterHeader(e *BoolEncoder, simple bool, level, sharpness int) {
+	if level < 0 {
+		level = 0
+	}
+	if level > 63 {
+		level = 63
+	}
+	if sharpness < 0 {
+		sharpness = 0
+	}
+	if sharpness > 7 {
+		sharpness = 7
+	}
+	b := 0
+	if simple {
+		b = 1
+	}
+	e.WriteBit(b, UniformProb)
+	e.WriteUint(uint32(level), 6, UniformProb)
+	e.WriteUint(uint32(sharpness), 3, UniformProb)
+	e.WriteBit(0, UniformProb) // useLFDelta
+}
+
+// WriteFilterHeaderOff is a backward-compatible shortcut for
+// WriteFilterHeader(e, false, 0, 0).
 func WriteFilterHeaderOff(e *BoolEncoder) {
-	e.WriteBit(0, UniformProb)     // simple
-	e.WriteUint(0, 6, UniformProb) // level
-	e.WriteUint(0, 3, UniformProb) // sharpness
-	e.WriteBit(0, UniformProb)     // useLFDelta
+	WriteFilterHeader(e, false, 0, 0)
 }
 
 // WriteLog2NumParts writes the log2 of the number of coefficient partitions

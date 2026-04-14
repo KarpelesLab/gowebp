@@ -59,7 +59,14 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 	p0 := NewBoolEncoder()
 	WriteHeaderInit(p0)
 	WriteSegmentHeaderOff(p0)
-	WriteFilterHeaderOff(p0)
+	// Enable the normal loop filter with a level derived from the
+	// quantizer. Larger QI (coarser quant) needs a stronger filter to
+	// hide block boundaries. libwebp uses a similar linear mapping.
+	filterLevel := baseQ/8 + 2
+	if filterLevel > 63 {
+		filterLevel = 63
+	}
+	WriteFilterHeader(p0, false, filterLevel, 0)
 	WriteLog2NumParts(p0, 0)
 	WriteQuantHeader(p0, baseQ)
 	WriteRefreshEntropyProbs(p0)
