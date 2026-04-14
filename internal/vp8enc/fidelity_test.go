@@ -333,6 +333,81 @@ func TestSkipSavesBytesOnFlat(t *testing.T) {
 	}
 }
 
+// TestArbitrationBugDiagnostic narrows down the Method=3 quality
+// regression that shows up on larger images at high Q.
+func TestArbitrationBugDiagnostic(t *testing.T) {
+	for _, sz := range []int{32, 48, 64, 96, 128} {
+		w, h := sz, sz
+		src := image.NewNRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				src.SetNRGBA(x, y, color.NRGBA{
+					uint8(x * 255 / w),
+					uint8(y * 255 / h),
+					uint8((x + y) * 255 / (w + h)),
+					255,
+				})
+			}
+		}
+		for _, m := range []int{1, 2, 3} {
+			var buf bytes.Buffer
+			if err := EncodeWebP(&buf, src, EncodeOptions{Quality: 90, Method: m}); err != nil {
+				t.Fatalf("%dx%d M=%d: %v", sz, sz, m, err)
+			}
+			dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Logf("%dx%d M=%d: decode err %v", sz, sz, m, err)
+				continue
+			}
+			ycbcr := dec.(*image.YCbCr)
+			psnrY := computePSNRLimited(src, ycbcr)
+			t.Logf("%dx%d M=%d Q=90: %d bytes, Y-PSNR=%.2f dB",
+				sz, sz, m, buf.Len(), psnrY)
+		}
+	}
+}
+
+// TestQualityCurve encodes the same image at a range of quality
+// settings and reports the size/quality curve. Intended as a human-
+// readable diagnostic, not a hard assertion (no pass/fail beyond
+// encoding succeeding at each Q).
+func TestQualityCurve(t *testing.T) {
+	if testing.Short() {
+		t.Skip("quality curve diagnostic")
+	}
+	w, h := 128, 128
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			src.SetNRGBA(x, y, color.NRGBA{
+				uint8(x * 255 / w),
+				uint8(y * 255 / h),
+				uint8((x + y) * 255 / (w + h)),
+				255,
+			})
+		}
+	}
+	t.Logf("128x128 gradient")
+	t.Logf("%5s %6s %8s %10s %10s", "Q", "Method", "bytes", "Y-PSNR", "RGB-PSNR")
+	t.Logf("%5s %6s %8s %10s %10s", "-----", "------", "--------", "----------", "----------")
+	for _, m := range []int{1, 2, 3} {
+		for _, q := range []float32{25, 50, 75, 90, 100} {
+			var buf bytes.Buffer
+			if err := EncodeWebP(&buf, src, EncodeOptions{Quality: q, Method: m}); err != nil {
+				t.Fatalf("Q=%.0f M=%d: %v", q, m, err)
+			}
+			dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatalf("Q=%.0f M=%d decode: %v", q, m, err)
+			}
+			ycbcr := dec.(*image.YCbCr)
+			psnrY := computePSNRLimited(src, ycbcr)
+			psnrRGB := computePSNRSpec(src, ycbcr)
+			t.Logf("%5.0f %6d %8d %9.2f dB %9.2f dB", q, m, buf.Len(), psnrY, psnrRGB)
+		}
+	}
+}
+
 // BenchmarkEncode256x256 measures encode throughput on a 256x256
 // natural-ish image across the three main method levels.
 func BenchmarkEncode256x256(b *testing.B) {

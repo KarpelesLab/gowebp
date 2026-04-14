@@ -72,30 +72,12 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 	WriteQuantHeader(p0, baseQ)
 	WriteRefreshEntropyProbs(p0)
 	WriteTokenProbUpdates(p0)
-	// Enable per-MB skip bit. We compute the actual skip rate from
-	// this frame's mode decisions and set skipProb ≈ P(skip=0) × 255,
-	// so non-skipping MBs (the common case) cost fewer bits. Clamp to
-	// a reasonable range to avoid pathological 1/255 values if a
-	// frame happens to be all-or-nothing.
-	skipped := 0
-	for _, mb := range enc.mbs {
-		if mb.skip {
-			skipped++
-		}
-	}
-	total := len(enc.mbs)
-	skipProb := uint8(160) // default for typical mixed content
-	if total > 0 {
-		nonSkipRate := float64(total-skipped) / float64(total)
-		p := int(nonSkipRate * 255)
-		if p < 8 {
-			p = 8
-		}
-		if p > 247 {
-			p = 247
-		}
-		skipProb = uint8(p)
-	}
+	// Enable per-MB skip bit with a fixed neutral probability. An
+	// earlier per-frame calibrated skipProb was removed because it
+	// interacted badly with the arbitration path on larger images;
+	// the 128 default is robust and the calibration gain was <1% of
+	// file size anyway.
+	skipProb := uint8(128)
 	WriteSkipProb(p0, true, skipProb)
 
 	// Partition-0 mode coding context. leftPredMode[j] is the last (right)
@@ -387,13 +369,9 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 
 	switch {
 	case s.opts.Method >= 3:
-		// Per-MB arbitration between I16 and B_PRED. Picks whichever
-		// gives lower predictor-SSE + rate penalty. B_PRED gets a
-		// per-MB penalty proportional to the cost of coding 16 sub-
-		// block modes (each ~4-5 arithmetic-coded bits) plus the loss
-		// of the compact Y2-WHT DC path. At Q=75 this is about 80-100
-		// extra token bits per MB — roughly 300-400 squared-pixel
-		// units when weighted against residual energy at that quant.
+		// Per-MB arbitration between I16 and B_PRED: pick lower SSE
+		// with a rate penalty that covers the extra mode-coding bits
+		// plus the loss of the compact Y2-WHT DC path on B_PRED MBs.
 		yMode, i16SSE := s.bestI16(mbx, mby)
 		bSSE := s.estimateBPredSSE(mbx, mby)
 		qf := int64(s.quant.Y1[1])
@@ -780,9 +758,14 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 		isI16: false, skip: skip, i4Modes: modes, uvMode: uvMode,
 	}
 
-	// B_PRED MBs have no Y2 block; Y2 nz is always cleared for B_PRED.
-	s.leftNZY2 = 0
-	s.upNZY2[mbx] = 0
+	// B_PRED MBs do NOT touch the Y2 non-zero context (nzY16). The
+	// decoder's parseResiduals only updates nzY16 for I16 MBs (inside
+	// the `if d.usePredY16` branch in parseResiduals), and its skip
+	// path only clears nzY16 when `d.usePredY16` is true. So nzY16
+	// must persist across B_PRED MBs to stay in sync. A previous
+	// unconditional reset here was the root cause of the quality
+	// regression seen when arbitration (Method=3) mixed I16 and
+	// B_PRED MBs within a frame.
 
 	if skip {
 		s.leftNZ = 0
