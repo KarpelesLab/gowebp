@@ -151,10 +151,21 @@ Or encode with lossy VP8 compression:
 err = nativewebp.Encode(file, img, &nativewebp.Options{
   Lossy:   true,
   Quality: 75, // 0 (smallest) to 100 (best); 75 is a reasonable default
-  Method:  2,  // 0 = fastest/I16-DC-only, 1 = I16 with mode search,
-               // 2 = B_PRED with 10 I4 modes per sub-block
+  Method:  3,  // speed/quality tradeoff
 })
 ```
+
+Method levels:
+
+| Method | Description | Speed | Size |
+|---|---|---|---|
+| 0 | I16 with DC_PRED only | fastest | largest |
+| 1 | I16 with 4-mode SSE search (DC/V/H/TM) | fast | baseline |
+| 2 | B_PRED with 10 I4 modes per 4×4 sub-block | slow | good on textures |
+| 3 | Per-MB I16 vs B_PRED arbitration **(recommended)** | slower | best |
+
+Higher method levels are reserved for future RDO/trellis work. The
+encoder supports `Method` values 0–6 but 4–6 currently behave like 3.
 
 Here’s a simple example of how to encode an animation:
 ```Go
