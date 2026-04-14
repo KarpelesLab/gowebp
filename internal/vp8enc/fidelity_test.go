@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"sync"
 	"testing"
 
 	xwebp "golang.org/x/image/webp"
@@ -207,6 +208,55 @@ func TestQuality100NearLossless(t *testing.T) {
 		buf.Len(), psnrY, psnrRGB)
 	if psnrY < 45 {
 		t.Errorf("Q=100 Y-PSNR %.2f below expected 45+", psnrY)
+	}
+}
+
+// TestEncodeConcurrent verifies the encoder has no shared mutable
+// state: N goroutines encoding the same image concurrently must all
+// produce byte-identical output.
+func TestEncodeConcurrent(t *testing.T) {
+	w, h := 64, 64
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			src.SetNRGBA(x, y, color.NRGBA{
+				uint8(x * 255 / w),
+				uint8(y * 255 / h),
+				uint8((x + y) * 255 / (w + h)),
+				255,
+			})
+		}
+	}
+	// Reference encode (single-threaded).
+	var ref bytes.Buffer
+	if err := EncodeWebP(&ref, src, EncodeOptions{Quality: 75, Method: 2}); err != nil {
+		t.Fatalf("ref: %v", err)
+	}
+	refBytes := ref.Bytes()
+
+	const N = 8
+	results := make([][]byte, N)
+	errs := make([]error, N)
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			var buf bytes.Buffer
+			errs[idx] = EncodeWebP(&buf, src, EncodeOptions{Quality: 75, Method: 2})
+			results[idx] = buf.Bytes()
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < N; i++ {
+		if errs[i] != nil {
+			t.Errorf("goroutine %d: %v", i, errs[i])
+			continue
+		}
+		if !bytes.Equal(results[i], refBytes) {
+			t.Errorf("goroutine %d output differs from reference", i)
+		}
 	}
 }
 
