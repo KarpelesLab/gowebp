@@ -1,4 +1,5 @@
-[![Codecov Coverage](https://codecov.io/gh/KarpelesLab/gowebp/branch/main/graph/badge.svg)](https://codecov.io/gh/KarpelesLab/gowebp)
+[![Tests](https://github.com/KarpelesLab/gowebp/actions/workflows/test.yml/badge.svg)](https://github.com/KarpelesLab/gowebp/actions/workflows/test.yml)
+[![Coverage Status](https://coveralls.io/repos/github/KarpelesLab/gowebp/badge.svg?branch=main)](https://coveralls.io/github/KarpelesLab/gowebp?branch=main)
 [![Go Reference](https://pkg.go.dev/badge/github.com/KarpelesLab/gowebp.svg)](https://pkg.go.dev/github.com/KarpelesLab/gowebp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 

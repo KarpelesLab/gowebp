@@ -1,0 +1,49 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25', '1.26']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go ${{ matrix.go }}
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with coverage
+        # -coverpkg=./... so the parent-package tests also count coverage
+        # inside internal/vp8enc (not just tests co-located with that
+        # package). -covermode=atomic is required by Coveralls.
+        run: go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Coveralls
+        # Only upload once (from the newest Go version) to avoid
+        # duplicate submissions for the same commit.
+        if: matrix.go == '1.26'
+        uses: coverallsapp/github-action@v2
+        with:
+          file: coverage.out
+          format: golang
+          # GITHUB_TOKEN is automatically available on public repos —
+          # Coveralls uses it for OIDC-style auth, no separate token
+          # secret required.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
