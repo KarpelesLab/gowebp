@@ -63,12 +63,13 @@ func TestEncodePSNR(t *testing.T) {
 			}
 
 			psnr := computePSNR(src, dec)
-			var psnrY float64
+			var psnrY, psnrRGBSpec float64
 			if ycbcr, ok := dec.(*image.YCbCr); ok {
 				psnrY = computePSNRLimited(src, ycbcr)
+				psnrRGBSpec = computePSNRSpec(src, ycbcr)
 			}
-			t.Logf("%s: RGB-PSNR (jfif-via-stdlib) = %.2f dB, Y-PSNR (spec) = %.2f dB",
-				c.name, psnr, psnrY)
+			t.Logf("%s: RGB(spec)=%.2f dB, Y=%.2f dB, RGB(jfif)=%.2f dB",
+				c.name, psnrRGBSpec, psnrY, psnr)
 			if psnr < c.minPSNR {
 				t.Errorf("%s: RGB-PSNR %.2f dB below threshold %.2f dB",
 					c.name, psnr, c.minPSNR)
@@ -261,6 +262,50 @@ func computePSNR(a, b image.Image) float64 {
 			dr := float64(ar>>8) - float64(br>>8)
 			dg := float64(ag>>8) - float64(bg>>8)
 			db := float64(ab>>8) - float64(bb>>8)
+			sumSq += dr*dr + dg*dg + db*db
+			n += 3
+		}
+	}
+	if sumSq == 0 {
+		return math.Inf(1)
+	}
+	mse := sumSq / n
+	return 10 * math.Log10(255*255/mse)
+}
+
+// computePSNRSpec converts the decoded YCbCr back to RGB using the
+// VP8 spec's limited-range BT.601 inverse (matching what a
+// spec-compliant decoder like libwebp / browsers produce) and
+// compares against source RGB. This is the fair "what will users
+// actually see when viewing the encoded file" quality metric.
+func computePSNRSpec(src image.Image, dec *image.YCbCr) float64 {
+	rect := src.Bounds()
+	var sumSq float64
+	var n float64
+
+	// Limited-range BT.601 inverse (VP8 spec / libwebp). Integer form:
+	//   R = clip((298*(Y-16)             + 409*(Cr-128) + 128) >> 8)
+	//   G = clip((298*(Y-16) - 100*(Cb-128) - 208*(Cr-128) + 128) >> 8)
+	//   B = clip((298*(Y-16) + 516*(Cb-128)               + 128) >> 8)
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			sr, sg, sb, _ := src.At(x, y).RGBA()
+			Rs := int32(sr >> 8)
+			Gs := int32(sg >> 8)
+			Bs := int32(sb >> 8)
+
+			lx := x - rect.Min.X
+			ly := y - rect.Min.Y
+			Y := int32(dec.Y[ly*dec.YStride+lx]) - 16
+			Cb := int32(dec.Cb[(ly/2)*dec.CStride+(lx/2)]) - 128
+			Cr := int32(dec.Cr[(ly/2)*dec.CStride+(lx/2)]) - 128
+			R := clampInt32((298*Y+409*Cr+128)>>8, 0, 255)
+			G := clampInt32((298*Y-100*Cb-208*Cr+128)>>8, 0, 255)
+			B := clampInt32((298*Y+516*Cb+128)>>8, 0, 255)
+
+			dr := float64(Rs - R)
+			dg := float64(Gs - G)
+			db := float64(Bs - B)
 			sumSq += dr*dr + dg*dg + db*db
 			n += 3
 		}
