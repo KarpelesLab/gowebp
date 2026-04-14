@@ -72,12 +72,28 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 	WriteQuantHeader(p0, baseQ)
 	WriteRefreshEntropyProbs(p0)
 	WriteTokenProbUpdates(p0)
-	// Enable per-MB skip bit with a fixed neutral probability. An
-	// earlier per-frame calibrated skipProb was removed because it
-	// interacted badly with the arbitration path on larger images;
-	// the 128 default is robust and the calibration gain was <1% of
-	// file size anyway.
-	skipProb := uint8(128)
+	// Enable per-MB skip bit. Calibrate skipProb ≈ P(skip=0) × 255
+	// against the actual skip rate of this frame so non-skipping MBs
+	// (the common case) cost fewer bits. Clamped to [8, 247] to
+	// avoid degenerate extreme probabilities.
+	skipped := 0
+	for _, mb := range enc.mbs {
+		if mb.skip {
+			skipped++
+		}
+	}
+	total := len(enc.mbs)
+	skipProb := uint8(160)
+	if total > 0 {
+		p := int(float64(total-skipped) / float64(total) * 255)
+		if p < 8 {
+			p = 8
+		}
+		if p > 247 {
+			p = 247
+		}
+		skipProb = uint8(p)
+	}
 	WriteSkipProb(p0, true, skipProb)
 
 	// Partition-0 mode coding context. leftPredMode[j] is the last (right)
