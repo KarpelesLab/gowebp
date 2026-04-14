@@ -102,6 +102,40 @@ func TestYUVEdgePadding(t *testing.T) {
 	}
 }
 
+// TestRGBAToFrameAcceptsNonNRGBA checks that the encoder's frame-builder
+// handles various input types by materializing to NRGBA internally, not
+// just image.NRGBA.
+func TestRGBAToFrameAcceptsNonNRGBA(t *testing.T) {
+	// image.RGBA (premultiplied alpha).
+	rgba := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			rgba.Set(x, y, color.RGBA{100, 150, 200, 255})
+		}
+	}
+	f := RGBAToFrame(rgba)
+	if f.Width != 16 || f.Height != 16 {
+		t.Errorf("RGBA: dims %dx%d", f.Width, f.Height)
+	}
+
+	// image.Gray.
+	gray := image.NewGray(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			gray.SetGray(x, y, color.Gray{128})
+		}
+	}
+	f = RGBAToFrame(gray)
+	if f.Width != 16 || f.Height != 16 {
+		t.Errorf("Gray: dims %dx%d", f.Width, f.Height)
+	}
+	// Every Y-plane pixel should encode gray 128 to Y ~= 126
+	// (limited-range BT.601 of rgb=128,128,128).
+	if f.Y[0] < 120 || f.Y[0] > 132 {
+		t.Errorf("Gray 128 -> Y=%d, want ~126", f.Y[0])
+	}
+}
+
 func TestExtractAlphaOpaque(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 8, 8))
 	for y := 0; y < 8; y++ {
