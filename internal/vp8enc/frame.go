@@ -500,6 +500,9 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 		// DC was zeroed; AC gets a moderate deadzone to save entropy.
 		QuantizeBlockSplit(yCoef[s_][:], y1Q[s_][:], y1DQ[s_][:],
 			s.quant.Y1[0], s.quant.Y1[1], 0, int32(s.quant.Y1[1])/4)
+		if s.opts.Method >= 6 {
+			TrellisTrim(&y1Q[s_], &y1DQ[s_], s.quant.Y1[1])
+		}
 	}
 
 	// 9. Chroma: Cb then Cr (4 blocks each).
@@ -765,8 +768,12 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 			FDCT4x4(res[:], coef[:])
 			// B_PRED has no Y2, so the DC of each 4x4 block IS emitted
 			// through Y1SansY2. DC gets no deadzone; AC gets moderate.
-			QuantizeBlockSplit(coef[:], yQ[sj*4+si][:], dq[:],
+			subQ := &yQ[sj*4+si]
+			QuantizeBlockSplit(coef[:], subQ[:], dq[:],
 				s.quant.Y1[0], s.quant.Y1[1], 0, int32(s.quant.Y1[1])/4)
+			if s.opts.Method >= 6 {
+				TrellisTrim(subQ, &dq, s.quant.Y1[1])
+			}
 
 			// Reconstruct (needed for subsequent sub-blocks' prediction).
 			var resRec [16]int16

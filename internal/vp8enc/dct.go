@@ -329,6 +329,40 @@ func QuantizeBlockSplit(
 	return eob
 }
 
+// TrellisTrim performs a simple trailing-noise trellis pass on a
+// quantized 4x4 block: examines non-zero coefficients at mid-to-high
+// zigzag positions with magnitude 1 and zeroes them in place. Moving
+// the EOB earlier saves ~3-5 arithmetic-coded bits per coefficient at
+// the cost of a small reconstruction error.
+//
+// This isn't the full Viterbi trellis (which would track token-context
+// transitions across all 16 positions simultaneously), but captures
+// the common pathology where the last few non-zero coefficients are
+// ±1s that barely survived rounding.
+//
+// Returns the new EOB (count of coefficients up to and including the
+// last non-zero in zigzag order).
+func TrellisTrim(q *[16]int16, dq *[16]int16, acFactor uint16) int {
+	eob := 16
+	for eob > 0 && q[Zigzag4x4[eob-1]] == 0 {
+		eob--
+	}
+	// Walk backward from the last non-zero position. Zero out any
+	// ±1 coefficients at zigzag position >= 5 (past the low-frequency
+	// plateau where DC dominance ends). Lower positions represent the
+	// perceptually visible primary AC terms and are kept.
+	for eob >= 6 {
+		rc := Zigzag4x4[eob-1]
+		if q[rc] != 1 && q[rc] != -1 {
+			break
+		}
+		q[rc] = 0
+		dq[rc] = 0
+		eob--
+	}
+	return eob
+}
+
 // DequantizeBlock reconstructs coefficients from a quantized block in the
 // zigzag-ordered input `q`. Writes to `coef` in raster 4x4 order.
 // (This is the operation the decoder performs implicitly via the coefficient
