@@ -173,6 +173,46 @@ func TestBPredBeatsI16OnTexture(t *testing.T) {
 	}
 }
 
+// TestEncodeTinyImages verifies the encoder handles the smallest
+// possible inputs correctly: 1x1 up to the first full-MB size (16x16)
+// and sizes that aren't MB-aligned.
+func TestEncodeTinyImages(t *testing.T) {
+	sizes := []struct{ w, h int }{
+		{1, 1}, {2, 2}, {3, 5}, {7, 7}, {8, 16},
+		{15, 15}, {16, 16}, {17, 17}, {31, 9}, {33, 33},
+	}
+	for _, sz := range sizes {
+		src := image.NewNRGBA(image.Rect(0, 0, sz.w, sz.h))
+		for y := 0; y < sz.h; y++ {
+			for x := 0; x < sz.w; x++ {
+				src.SetNRGBA(x, y, color.NRGBA{
+					uint8((x * 255) / (sz.w + 1)),
+					uint8((y * 255) / (sz.h + 1)),
+					uint8(((x + y) * 255) / (sz.w + sz.h + 1)),
+					255,
+				})
+			}
+		}
+		var buf bytes.Buffer
+		for _, m := range []int{0, 1, 2, 3} {
+			buf.Reset()
+			if err := EncodeWebP(&buf, src, EncodeOptions{Quality: 75, Method: m}); err != nil {
+				t.Errorf("%dx%d M=%d: encode error %v", sz.w, sz.h, m, err)
+				continue
+			}
+			dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Errorf("%dx%d M=%d: decode error %v", sz.w, sz.h, m, err)
+				continue
+			}
+			b := dec.Bounds()
+			if b.Dx() != sz.w || b.Dy() != sz.h {
+				t.Errorf("%dx%d M=%d: decoded %v", sz.w, sz.h, m, b)
+			}
+		}
+	}
+}
+
 // TestSkipSavesBytesOnFlat checks that MBs with all-zero quantized
 // coefficients trigger the skip bit and omit token emission. Flat
 // content after prediction produces near-zero residuals that quantize
