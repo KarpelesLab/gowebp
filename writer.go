@@ -113,6 +113,12 @@ func Encode(w io.Writer, img image.Image, o *Options) error {
 // carrying the alpha plane inside a VP8X container (spec section 2 /
 // WebP container spec "Alpha").
 func encodeLossy(w io.Writer, img image.Image, o *Options) error {
+    if o.Quality < 0 || o.Quality > 100 {
+        return errors.New("Options.Quality must be in [0, 100]")
+    }
+    if o.Method < 0 || o.Method > 6 {
+        return errors.New("Options.Method must be in [0, 6]")
+    }
     q := o.Quality
     if q == 0 {
         q = 75

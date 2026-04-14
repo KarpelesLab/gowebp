@@ -305,6 +305,36 @@ func TestEncodeLossyOpaqueNoALPH(t *testing.T) {
     }
 }
 
+// TestEncodeLossyOptionsValidation verifies that out-of-range Options
+// fields produce clear errors instead of silently mis-encoding.
+func TestEncodeLossyOptionsValidation(t *testing.T) {
+    img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+    cases := []struct {
+        name string
+        opts *Options
+    }{
+        {"negative quality", &Options{Lossy: true, Quality: -1}},
+        {"quality over 100", &Options{Lossy: true, Quality: 101}},
+        {"negative method", &Options{Lossy: true, Method: -1}},
+        {"method over 6", &Options{Lossy: true, Method: 7}},
+    }
+    for _, c := range cases {
+        t.Run(c.name, func(t *testing.T) {
+            var buf bytes.Buffer
+            if err := Encode(&buf, img, c.opts); err == nil {
+                t.Errorf("expected error for %v", c.opts)
+            }
+        })
+    }
+    // Boundary values should work.
+    if err := Encode(new(bytes.Buffer), img, &Options{Lossy: true, Quality: 0, Method: 0}); err != nil {
+        t.Errorf("Quality=0 Method=0 should be accepted: %v", err)
+    }
+    if err := Encode(new(bytes.Buffer), img, &Options{Lossy: true, Quality: 100, Method: 6}); err != nil {
+        t.Errorf("Quality=100 Method=6 should be accepted: %v", err)
+    }
+}
+
 // TestEncodeLosslessUnchanged guards against the lossy dispatch breaking
 // the existing VP8L path: default options (nil or Lossy=false) must still
 // produce VP8L output.
