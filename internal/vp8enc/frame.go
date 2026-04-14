@@ -704,25 +704,16 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 				}
 			}
 
-			// Min-SSE mode search. Skip modes that require unavailable
-			// neighbors on frame edges (let DC always be a fallback).
-			hasTop := mby > 0 || sj > 0
-			hasLeft := mbx > 0 || si > 0
+			// Min-SSE mode search over all 10 I4 modes. Edge
+			// sub-blocks see the same defaults (0x7f top, 0x81 left)
+			// that the decoder fills via prepareYBR, so every mode is
+			// legally applicable. Any previous quality regression from
+			// allowing all modes at edges was from the nzY16 bug
+			// (fixed in 8fe2243) corrupting subsequent MB contexts.
 			bestMode := ModeI4DC
 			bestSSE := int64(-1)
 			var bestPred [16]byte
 			for m := 0; m < NumPredModes; m++ {
-				if !hasTop && (m == ModeI4VE || m == ModeI4RD || m == ModeI4VR ||
-					m == ModeI4LD || m == ModeI4VL) {
-					continue
-				}
-				if !hasLeft && (m == ModeI4HE || m == ModeI4RD || m == ModeI4VR ||
-					m == ModeI4HD || m == ModeI4HU) {
-					continue
-				}
-				if m == ModeI4TM && (!hasTop || !hasLeft) {
-					continue
-				}
 				var pred [16]byte
 				PredictI4(&pred, m, tl, &top, &left)
 				sse := SumSquaredError(src[:], pred[:])
