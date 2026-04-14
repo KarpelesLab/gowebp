@@ -429,7 +429,7 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 
 	// 7. Quantize Y2 block.
 	var y2Q, y2DQ [16]int16
-	dz := int32(s.quant.Y2[1]) / 4
+	dz := int32(0)
 	QuantizeBlock(y2Coef[:], y2Q[:], y2DQ[:], s.quant.Y2[0], s.quant.Y2[1], dz)
 
 	// 8. Quantize Y1 AC (skipping DC — it's in Y2).
@@ -440,7 +440,7 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 		// coeffs. However the dequantized DC for reconstruction comes
 		// from the Y2 block (below).
 		yCoef[s_][0] = 0
-		dzAC := int32(s.quant.Y1[1]) / 4
+		dzAC := int32(0)
 		QuantizeBlock(yCoef[s_][:], y1Q[s_][:], y1DQ[s_][:],
 			s.quant.Y1[0], s.quant.Y1[1], dzAC)
 	}
@@ -499,7 +499,7 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 				}
 			}
 			FDCT4x4(cbRes[subIdx][:], cbCoef[subIdx][:])
-			dzUV := int32(s.quant.UV[1]) / 4
+			dzUV := int32(0)
 			QuantizeBlock(cbCoef[subIdx][:], cbQ[subIdx][:], cbDQ[subIdx][:],
 				s.quant.UV[0], s.quant.UV[1], dzUV)
 		}
@@ -519,7 +519,7 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 				}
 			}
 			FDCT4x4(crRes[subIdx][:], crCoef[subIdx][:])
-			dzUV := int32(s.quant.UV[1]) / 4
+			dzUV := int32(0)
 			QuantizeBlock(crCoef[subIdx][:], crQ[subIdx][:], crDQ[subIdx][:],
 				s.quant.UV[0], s.quant.UV[1], dzUV)
 		}
@@ -716,7 +716,7 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 				res[k] = int16(src[k]) - int16(bestPred[k])
 			}
 			FDCT4x4(res[:], coef[:])
-			dzAC := int32(s.quant.Y1[1]) / 4
+			dzAC := int32(0)
 			QuantizeBlock(coef[:], q[:], dq[:], s.quant.Y1[0], s.quant.Y1[1], dzAC)
 
 			// Emit tokens (Y1SansY2 plane, no Y2 DC skip).
@@ -873,7 +873,7 @@ func (s *encState) encodeMBChroma(mbx, mby int, uvMode int) {
 			}
 			FDCT4x4(cbRes[subIdx][:], cbCoef[subIdx][:])
 			FDCT4x4(crRes[subIdx][:], crCoef[subIdx][:])
-			dzUV := int32(s.quant.UV[1]) / 4
+			dzUV := int32(0)
 			QuantizeBlock(cbCoef[subIdx][:], cbQ[subIdx][:], cbDQ[subIdx][:],
 				s.quant.UV[0], s.quant.UV[1], dzUV)
 			QuantizeBlock(crCoef[subIdx][:], crQ[subIdx][:], crDQ[subIdx][:],

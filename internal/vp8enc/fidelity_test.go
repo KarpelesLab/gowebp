@@ -16,18 +16,24 @@ import (
 // I16-only encoding. Higher PSNR requires I4 modes (later phase).
 func TestEncodePSNR(t *testing.T) {
 	cases := []struct {
-		name    string
-		quality float32
-		method  int
-		minPSNR float64
+		name     string
+		quality  float32
+		method   int
+		minPSNR  float64
+		minPSNRY float64 // spec-correct limited-range Y-PSNR
 	}{
-		{"q90-method-1", 90, 1, 28},
-		{"q75-method-1", 75, 1, 25},
-		{"q50-method-1", 50, 1, 22},
-		{"q90-method-2", 90, 2, 28},
-		{"q75-method-2", 75, 2, 25},
-		{"q75-method-3", 75, 3, 26}, // per-MB arbitration
-		{"q90-method-3", 90, 3, 28},
+		// minPSNR is the RGB-PSNR through Go's (JFIF) YCbCrToRGB, which
+		// always caps around 28 dB because of the BT.601 range mismatch
+		// with VP8's limited-range color space.
+		// minPSNRY is the luma-only PSNR computed against the spec's
+		// limited-range BT.601, which is the actual encoder quality.
+		{"q90-method-1", 90, 1, 28, 45},
+		{"q75-method-1", 75, 1, 25, 40},
+		{"q50-method-1", 50, 1, 22, 35},
+		{"q90-method-2", 90, 2, 28, 45},
+		{"q75-method-2", 75, 2, 25, 40},
+		{"q75-method-3", 75, 3, 26, 40},
+		{"q90-method-3", 90, 3, 28, 45},
 	}
 
 	for _, c := range cases {
@@ -57,10 +63,19 @@ func TestEncodePSNR(t *testing.T) {
 			}
 
 			psnr := computePSNR(src, dec)
-			t.Logf("%s: PSNR = %.2f dB", c.name, psnr)
+			var psnrY float64
+			if ycbcr, ok := dec.(*image.YCbCr); ok {
+				psnrY = computePSNRLimited(src, ycbcr)
+			}
+			t.Logf("%s: RGB-PSNR (jfif-via-stdlib) = %.2f dB, Y-PSNR (spec) = %.2f dB",
+				c.name, psnr, psnrY)
 			if psnr < c.minPSNR {
-				t.Errorf("%s: PSNR %.2f dB below threshold %.2f dB",
+				t.Errorf("%s: RGB-PSNR %.2f dB below threshold %.2f dB",
 					c.name, psnr, c.minPSNR)
+			}
+			if psnrY > 0 && psnrY < c.minPSNRY {
+				t.Errorf("%s: Y-PSNR %.2f dB below threshold %.2f dB",
+					c.name, psnrY, c.minPSNRY)
 			}
 		})
 	}
@@ -141,6 +156,12 @@ func TestEncodeSolidColor(t *testing.T) {
 
 // computePSNR compares two images pixel-by-pixel in sRGB space and
 // returns PSNR in dB (higher is better; 40+ is visually lossless).
+//
+// NOTE: if b is an *image.YCbCr (which is what x/image/vp8 and
+// x/image/webp return for lossy), this converts via Go's stdlib
+// YCbCrToRGB which uses JFIF (full-range) BT.601. That differs from
+// VP8's limited-range BT.601 and injects a systematic ~2-4 unit error
+// per channel. For a spec-correct PSNR, use computePSNRLimited below.
 func computePSNR(a, b image.Image) float64 {
 	rect := a.Bounds()
 	var sumSq float64
@@ -154,6 +175,44 @@ func computePSNR(a, b image.Image) float64 {
 			db := float64(ab>>8) - float64(bb>>8)
 			sumSq += dr*dr + dg*dg + db*db
 			n += 3
+		}
+	}
+	if sumSq == 0 {
+		return math.Inf(1)
+	}
+	mse := sumSq / n
+	return 10 * math.Log10(255*255/mse)
+}
+
+// computePSNRLimited converts the source image to YCbCr using the VP8
+// spec's limited-range BT.601 and compares it against b's raw YCbCr
+// planes. This avoids the JFIF/BT.601-range mismatch that Go's
+// image/color YCbCrToRGB introduces when called on VP8 output.
+//
+// Returns PSNR-Y (luma-only), which is typically 2-3 dB higher than
+// RGB PSNR and is the standard metric in video compression literature.
+func computePSNRLimited(src image.Image, vp8Decoded *image.YCbCr) float64 {
+	rect := src.Bounds()
+	var sumSq float64
+	var n float64
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			r, g, b, _ := src.At(x, y).RGBA()
+			R := int32(r >> 8)
+			G := int32(g >> 8)
+			B := int32(b >> 8)
+			// VP8 spec limited-range Y
+			Y := (66*R+129*G+25*B+128)>>8 + 16
+			if Y < 0 {
+				Y = 0
+			}
+			if Y > 255 {
+				Y = 255
+			}
+			decY := int32(vp8Decoded.Y[(y-rect.Min.Y)*vp8Decoded.YStride+(x-rect.Min.X)])
+			d := float64(Y - decY)
+			sumSq += d * d
+			n += 1
 		}
 	}
 	if sumSq == 0 {
