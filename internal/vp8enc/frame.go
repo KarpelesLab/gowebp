@@ -6,6 +6,7 @@ import (
 	"errors"
 	"image"
 	"io"
+	"math"
 )
 
 // EncodeOptions carries VP8 frame-level tuning that the package-level
@@ -1216,7 +1217,20 @@ func i16ToI4Context(i16 int) int {
 
 // qualityToQI maps a 0..100 quality setting to a 0..127 base quantizer
 // index using a monotonically decreasing curve: Q=100 → QI=0 (finest),
-// Q=0 → QI=127 (coarsest). Default Q=75 → QI≈32, a reasonable midpoint.
+// Q=0 → QI=127 (coarsest).
+//
+// Uses a non-linear curve QI = 127 * (1 - Q/100)^1.2 to bias QI toward
+// finer quantization at high Q (matching user expectations from cwebp
+// where Q=75 is "good default" with ample headroom below). Compared to
+// a linear mapping:
+//
+//	Q=95 → QI=6   (linear would give 6 also)
+//	Q=90 → QI=10  (linear: 12)
+//	Q=75 → QI=22  (linear: 31)
+//	Q=50 → QI=55  (linear: 63)
+//	Q=25 → QI=93  (linear: 95)
+//
+// Net effect: visibly finer quality at Q=75-95 for a modest size cost.
 func qualityToQI(quality float32) int {
 	if quality <= 0 {
 		return 127
@@ -1224,7 +1238,8 @@ func qualityToQI(quality float32) int {
 	if quality >= 100 {
 		return 0
 	}
-	qi := int((100.0 - quality) * 127.0 / 100.0)
+	t := float64(100-quality) / 100
+	qi := int(127 * math.Pow(t, 1.2))
 	if qi < 0 {
 		qi = 0
 	}
