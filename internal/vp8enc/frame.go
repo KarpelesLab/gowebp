@@ -986,15 +986,6 @@ func (s *encState) bestI16(mbx, mby int) (int, int64) {
 	best := ModeDC
 	bestSSE := int64(-1)
 	for _, m := range []int{ModeDC, ModeVE, ModeHE, ModeTM} {
-		if m == ModeVE && !hasTop {
-			continue
-		}
-		if m == ModeHE && !hasLeft {
-			continue
-		}
-		if m == ModeTM && (!hasTop || !hasLeft) {
-			continue
-		}
 		var pred [256]byte
 		PredictI16(&pred, m, &top, &left, tl, hasTop, hasLeft)
 		sse := SumSquaredError(src[:], pred[:])
@@ -1152,18 +1143,7 @@ func (s *encState) pickYMode(mbx, mby int) int {
 
 	best := ModeDC
 	bestSSE := int64(-1)
-	modes := []int{ModeDC, ModeVE, ModeHE, ModeTM}
-	for _, m := range modes {
-		// VE and HE require the respective neighbor; fall back gracefully.
-		if m == ModeVE && !hasTop {
-			continue
-		}
-		if m == ModeHE && !hasLeft {
-			continue
-		}
-		if m == ModeTM && (!hasTop || !hasLeft) {
-			continue
-		}
+	for _, m := range []int{ModeDC, ModeVE, ModeHE, ModeTM} {
 		var pred [256]byte
 		PredictI16(&pred, m, &top, &left, tl, hasTop, hasLeft)
 		sse := SumSquaredError(src[:], pred[:])
