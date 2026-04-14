@@ -109,6 +109,8 @@ func TestEncodeNaturalContent(t *testing.T) {
 		{50, 2, 28},
 		{90, 4, 40}, // Method=4 reconstruction-RDO should match or
 		{75, 4, 34}, // exceed Method=2 quality on natural content.
+		{90, 5, 40}, // Method=5 dual-path arbitration.
+		{75, 5, 34},
 	}
 	for _, c := range cases {
 		var buf bytes.Buffer
@@ -392,7 +394,7 @@ func TestQualityCurve(t *testing.T) {
 	t.Logf("128x128 gradient")
 	t.Logf("%5s %6s %8s %10s %10s", "Q", "Method", "bytes", "Y-PSNR", "RGB-PSNR")
 	t.Logf("%5s %6s %8s %10s %10s", "-----", "------", "--------", "----------", "----------")
-	for _, m := range []int{1, 2, 3, 4} {
+	for _, m := range []int{1, 2, 3, 4, 5} {
 		for _, q := range []float32{25, 50, 75, 90, 100} {
 			var buf bytes.Buffer
 			if err := EncodeWebP(&buf, src, EncodeOptions{Quality: q, Method: m}); err != nil {

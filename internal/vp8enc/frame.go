@@ -384,13 +384,27 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 	uvMode := s.pickUVMode(mbx, mby)
 
 	switch {
-	case s.opts.Method >= 4:
-		// Method 4+: I16 side uses full reconstruction SSE; B_PRED
+	case s.opts.Method >= 5:
+		// Method 5+: both sides measured as actual reconstruction SSE
+		// (apples-to-apples). Adds only the mode-coding overhead
+		// penalty on the B_PRED side since that's a real extra bit
+		// cost not reflected in distortion.
+		yMode, i16Cost := s.bestI16RD(mbx, mby)
+		bCost := s.measureBPredDistortion(mbx, mby)
+		qf := int64(s.quant.Y1[1])
+		bPenalty := qf * qf * 2
+		if i16Cost <= bCost+bPenalty {
+			s.encodeI16MB(mbx, mby, yMode, uvMode)
+		} else {
+			s.encodeBPredMB(mbx, mby, uvMode)
+		}
+		return
+	case s.opts.Method == 4:
+		// Method 4: I16 side uses full reconstruction SSE; B_PRED
 		// side uses prediction SSE plus an expected-quantization-
 		// noise correction so both sides are compared in similar
-		// units. Noise estimate is ~256 · q²/12 per MB (uniform
-		// quantization, 256 pixels), plus the mode-coding overhead
-		// penalty.
+		// units. Faster than Method=5 because B_PRED distortion is
+		// estimated rather than fully measured.
 		yMode, i16Cost := s.bestI16RD(mbx, mby)
 		bSSE := s.estimateBPredSSE(mbx, mby)
 		qf := int64(s.quant.Y1[1])
@@ -1115,6 +1129,104 @@ func (s *encState) bestI16RD(mbx, mby int) (int, int64) {
 		}
 	}
 	return bestMode, bestCost
+}
+
+// measureBPredDistortion runs the full B_PRED encode pipeline in a
+// scratch buffer and returns the resulting reconstruction SSE vs the
+// source MB. No global encoder state (s.reconY, nz masks, mbs slice,
+// p1) is touched, so the caller can compare this against bestI16RD's
+// cost and commit whichever wins. ~2× the cost of estimateBPredSSE
+// but gives comparable-units arbitration.
+func (s *encState) measureBPredDistortion(mbx, mby int) int64 {
+	var topRow [20]byte
+	var leftCol [16]byte
+	corner := s.getYTopLeft(mbx, mby)
+
+	if mby == 0 {
+		for i := 0; i < 20; i++ {
+			topRow[i] = 0x7f
+		}
+	} else {
+		ybase := (mby*16 - 1) * s.frame.YStride
+		for i := 0; i < 16; i++ {
+			topRow[i] = s.reconY[ybase+mbx*16+i]
+		}
+		if mbx == s.frame.MBWidth-1 {
+			r := s.reconY[ybase+mbx*16+15]
+			for i := 16; i < 20; i++ {
+				topRow[i] = r
+			}
+		} else {
+			for i := 0; i < 4; i++ {
+				topRow[16+i] = s.reconY[ybase+mbx*16+16+i]
+			}
+		}
+	}
+	if mbx == 0 {
+		for j := 0; j < 16; j++ {
+			leftCol[j] = 0x81
+		}
+	} else {
+		for j := 0; j < 16; j++ {
+			leftCol[j] = s.reconY[(mby*16+j)*s.frame.YStride+mbx*16-1]
+		}
+	}
+
+	var inMB [16][16]byte
+	var distortion int64
+
+	for sj := 0; sj < 4; sj++ {
+		for si := 0; si < 4; si++ {
+			var tl byte
+			var top [8]byte
+			var left [4]byte
+			s.buildI4Neighbors(&tl, &top, &left, &inMB, &topRow, &leftCol, corner, si, sj)
+
+			var src [16]byte
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					src[j*4+i] = s.frame.Y[(mby*16+sj*4+j)*s.frame.YStride+mbx*16+si*4+i]
+				}
+			}
+
+			bestSSE := int64(-1)
+			var bestPred [16]byte
+			for m := 0; m < NumPredModes; m++ {
+				var pred [16]byte
+				PredictI4(&pred, m, tl, &top, &left)
+				sse := SumSquaredError(src[:], pred[:])
+				if bestSSE < 0 || sse < bestSSE {
+					bestSSE = sse
+					bestPred = pred
+				}
+			}
+
+			// Quantize + reconstruct this sub-block.
+			var res, coef, q, dq, resRec [16]int16
+			for k := 0; k < 16; k++ {
+				res[k] = int16(src[k]) - int16(bestPred[k])
+			}
+			FDCT4x4(res[:], coef[:])
+			QuantizeBlockSplit(coef[:], q[:], dq[:],
+				s.quant.Y1[0], s.quant.Y1[1], 0, int32(s.quant.Y1[1])/4)
+			IDCT4x4(dq[:], resRec[:])
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					v := int32(bestPred[j*4+i]) + int32(resRec[j*4+i])
+					if v < 0 {
+						v = 0
+					}
+					if v > 255 {
+						v = 255
+					}
+					inMB[sj*4+j][si*4+i] = byte(v)
+					d := int32(src[j*4+i]) - v
+					distortion += int64(d) * int64(d)
+				}
+			}
+		}
+	}
+	return distortion
 }
 
 // estimateBPredSSE approximates the total SSE of the best per-sub-block
