@@ -436,6 +436,8 @@ func BenchmarkEncode256x256(b *testing.B) {
 		{"method-2-BPRED", 2},
 		{"method-3-arbitration", 3},
 		{"method-4-recon-RDO", 4},
+		{"method-5-dual-path", 5},
+		{"method-6-trellis", 6},
 	}
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {

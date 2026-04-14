@@ -159,17 +159,20 @@ Method levels (measured on i9-14900K, 256×256 image):
 
 | Method | Description | Speed | File size | Quality |
 |---|---|---|---|---|
-| 0 | I16 with DC_PRED only | ~1.4 ms | baseline | baseline |
-| 1 | I16 with 4-mode SSE search (DC/V/H/TM) | ~1.9 ms | = | +1-3 dB |
-| 2 | B_PRED with 10 I4 modes per 4×4 sub-block | ~1.9 ms | +5% | +2-5 dB |
-| 3 | Per-MB I16/B_PRED arbitration (prediction-SSE) | ~2.5 ms | slightly smaller | good default |
-| 4 | Per-MB arbitration with I16 reconstruction RDO | ~3.4 ms | smallest | **recommended** |
+| 0 | I16 with DC_PRED only | fastest | baseline | baseline |
+| 1 | I16 with 4-mode SSE search (DC/V/H/TM) | +40% | = | +1-3 dB |
+| 2 | B_PRED with 10 I4 modes per 4×4 sub-block | +55% | +5% | +2-5 dB |
+| 3 | Per-MB I16/B_PRED arbitration (prediction-SSE) | 2× | slightly smaller | good default |
+| 4 | Per-MB arbitration with I16 reconstruction RDO | 2.5× | smallest | **recommended** |
+| 5 | Dual-path arbitration (both sides measured) | 2.8× | = | reference |
+| 6 | Adds trailing-coefficient trellis trim | 2.9× | ≤ M5 | for textured content |
 
 On natural content, `Method=4` produces both smaller files AND higher
-PSNR than Method=3, at ~1.4× the encode time. It's recommended for
-most use cases unless encode latency matters more than output quality.
-Higher method levels (5–6) are accepted and currently behave like 4;
-reserved for future trellis quantization work.
+PSNR than Method=3, at a reasonable speed overhead. It's recommended
+for most use cases. Method=5 is a more principled but rarely-
+different reference; Method=6 adds a simple trellis that helps on
+textured content where post-quantization noise survives. Higher
+levels (>6) currently behave like 6.
 
 Encoding is goroutine-safe — each `Encode` call is self-contained
 and has no shared mutable state.
