@@ -26,6 +26,8 @@ func TestEncodePSNR(t *testing.T) {
 		{"q50-method-1", 50, 1, 22},
 		{"q90-method-2", 90, 2, 28},
 		{"q75-method-2", 75, 2, 25},
+		{"q75-method-3", 75, 3, 26}, // per-MB arbitration
+		{"q90-method-3", 90, 3, 28},
 	}
 
 	for _, c := range cases {

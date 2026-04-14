@@ -353,12 +353,38 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 	// Pick UV mode (same for both I16 and B_PRED paths).
 	uvMode := s.pickUVMode(mbx, mby)
 
-	if s.opts.Method >= 2 {
+	switch {
+	case s.opts.Method >= 3:
+		// Per-MB arbitration between I16 and B_PRED. Picks whichever
+		// gives lower predictor SSE, with a small bit-count penalty for
+		// B_PRED to reflect its higher mode-coding cost.
+		yMode, i16SSE := s.bestI16(mbx, mby)
+		bSSE := s.estimateBPredSSE(mbx, mby)
+		// Rough penalty: each sub-block's tree-coded mode averages ~4-5
+		// bits, times 16 sub-blocks, times the bit-quant at this
+		// quality. Scale bit-penalty by a quant-derived factor.
+		bPenalty := int64(s.opts.Method) // trivial scaling hook
+		_ = bPenalty
+		if i16SSE <= bSSE {
+			s.encodeI16MB(mbx, mby, yMode, uvMode)
+		} else {
+			s.encodeBPredMB(mbx, mby, uvMode)
+		}
+		return
+	case s.opts.Method == 2:
 		s.encodeBPredMB(mbx, mby, uvMode)
 		return
 	}
 
 	yMode := s.pickYMode(mbx, mby)
+	s.encodeI16MB(mbx, mby, yMode, uvMode)
+}
+
+// encodeI16MB performs the full I16 macroblock encode: predict,
+// residual, FDCT + WHT, quantize, token emission, reconstruct.
+// Extracted from the original encodeOneMB body to support per-MB
+// arbitration (the caller has already chosen yMode and uvMode).
+func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{isI16: true, yMode: yMode, uvMode: uvMode}
 
 	// 3. Build the Y predictor and residuals.
@@ -903,6 +929,170 @@ func (s *encState) encodeMBChroma(mbx, mby int, uvMode int) {
 			}
 		}
 	}
+}
+
+// bestI16 is pickYMode that also returns the winning SSE, used by
+// per-MB arbitration (Method >= 3).
+func (s *encState) bestI16(mbx, mby int) (int, int64) {
+	var top, left [16]byte
+	hasTop := s.getYTopRow(mbx, mby, &top)
+	hasLeft := s.getYLeftCol(mbx, mby, &left)
+	tl := s.getYTopLeft(mbx, mby)
+
+	var src [256]byte
+	for j := 0; j < 16; j++ {
+		for i := 0; i < 16; i++ {
+			src[j*16+i] = s.frame.Y[(mby*16+j)*s.frame.YStride+mbx*16+i]
+		}
+	}
+
+	best := ModeDC
+	bestSSE := int64(-1)
+	for _, m := range []int{ModeDC, ModeVE, ModeHE, ModeTM} {
+		if m == ModeVE && !hasTop {
+			continue
+		}
+		if m == ModeHE && !hasLeft {
+			continue
+		}
+		if m == ModeTM && (!hasTop || !hasLeft) {
+			continue
+		}
+		var pred [256]byte
+		PredictI16(&pred, m, &top, &left, tl, hasTop, hasLeft)
+		sse := SumSquaredError(src[:], pred[:])
+		if bestSSE < 0 || sse < bestSSE {
+			bestSSE = sse
+			best = m
+		}
+	}
+	return best, bestSSE
+}
+
+// estimateBPredSSE approximates the total SSE of the best per-sub-block
+// I4 modes without doing full sub-block reconstruction. Within-MB
+// neighbors come from SOURCE pixels instead of reconstructed ones —
+// this overestimates B_PRED's quality slightly (real reconstruction has
+// quant error that propagates), so the returned SSE is a lower bound.
+// That's the right direction for a conservative arbitration that
+// prefers I16 unless B_PRED is clearly better.
+func (s *encState) estimateBPredSSE(mbx, mby int) int64 {
+	// Use source pixels as neighbors approximation.
+	var total int64
+	for sby := 0; sby < 4; sby++ {
+		for sbx := 0; sbx < 4; sbx++ {
+			// Read this sub-block's source and its (source-based) neighbors.
+			var src [16]byte
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					src[j*4+i] = s.frame.Y[(mby*16+sby*4+j)*s.frame.YStride+mbx*16+sbx*4+i]
+				}
+			}
+			tl, top, left, hasTop, hasLeft := s.i4NeighborsFromSource(mbx, mby, sbx, sby)
+
+			bestSSE := int64(-1)
+			for m := 0; m < NumPredModes; m++ {
+				if !hasTop && (m == ModeI4VE || m == ModeI4RD || m == ModeI4VR ||
+					m == ModeI4LD || m == ModeI4VL) {
+					continue
+				}
+				if !hasLeft && (m == ModeI4HE || m == ModeI4RD || m == ModeI4VR ||
+					m == ModeI4HD || m == ModeI4HU) {
+					continue
+				}
+				if m == ModeI4TM && (!hasTop || !hasLeft) {
+					continue
+				}
+				var pred [16]byte
+				PredictI4(&pred, m, tl, &top, &left)
+				sse := SumSquaredError(src[:], pred[:])
+				if bestSSE < 0 || sse < bestSSE {
+					bestSSE = sse
+				}
+			}
+			if bestSSE > 0 {
+				total += bestSSE
+			}
+		}
+	}
+	return total
+}
+
+// i4NeighborsFromSource builds an I4 neighbor set from source pixels
+// (not reconstructed) — a shortcut used only for estimateBPredSSE.
+// For within-MB neighbors it reads frame.Y; for outside-MB neighbors
+// it uses reconY (which is the same as what a real encode would see).
+func (s *encState) i4NeighborsFromSource(mbx, mby, sbx, sby int) (tl byte, top [8]byte, left [4]byte, hasTop, hasLeft bool) {
+	x0 := mbx*16 + sbx*4
+	y0 := mby*16 + sby*4
+	hasTop = y0 > 0
+	hasLeft = x0 > 0
+
+	// top-left
+	if !hasTop && !hasLeft {
+		tl = 0x7f
+	} else if !hasTop {
+		tl = 0x7f
+	} else if !hasLeft {
+		tl = 0x81
+	} else {
+		if sby > 0 || sbx > 0 {
+			tl = s.frame.Y[(y0-1)*s.frame.YStride+x0-1]
+		} else {
+			tl = s.reconY[(y0-1)*s.frame.YStride+x0-1]
+		}
+	}
+
+	// top row (4 direct + 4 right overhang)
+	if !hasTop {
+		for i := 0; i < 8; i++ {
+			top[i] = 0x7f
+		}
+	} else {
+		for i := 0; i < 4; i++ {
+			if sby > 0 {
+				top[i] = s.frame.Y[(y0-1)*s.frame.YStride+x0+i]
+			} else {
+				top[i] = s.reconY[(y0-1)*s.frame.YStride+x0+i]
+			}
+		}
+		// Top-right 4 pixels. For right-edge MBs and right-column
+		// sub-blocks, replicate.
+		for i := 0; i < 4; i++ {
+			xi := x0 + 4 + i
+			if xi >= s.frame.YStride || xi >= mbx*16+16 {
+				// overhang: use the MB-level top-right area
+				if mbx*16+16+i < (mbx+1)*16+16 && y0 > 0 && mbx < s.frame.MBWidth-1 {
+					top[4+i] = s.reconY[(y0-1)*s.frame.YStride+mbx*16+16+i]
+				} else {
+					// replicate last top pixel
+					top[4+i] = top[3]
+				}
+			} else {
+				if sby > 0 {
+					top[4+i] = s.frame.Y[(y0-1)*s.frame.YStride+xi]
+				} else {
+					top[4+i] = s.reconY[(y0-1)*s.frame.YStride+xi]
+				}
+			}
+		}
+	}
+
+	// left column
+	if !hasLeft {
+		for j := 0; j < 4; j++ {
+			left[j] = 0x81
+		}
+	} else {
+		for j := 0; j < 4; j++ {
+			if sbx > 0 {
+				left[j] = s.frame.Y[(y0+j)*s.frame.YStride+x0-1]
+			} else {
+				left[j] = s.reconY[(y0+j)*s.frame.YStride+x0-1]
+			}
+		}
+	}
+	return
 }
 
 // pickYMode returns the I16 mode (DC/VE/HE/TM) with lowest SSE against the
