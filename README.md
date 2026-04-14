@@ -157,17 +157,22 @@ err = nativewebp.Encode(file, img, &nativewebp.Options{
 
 Method levels (measured on i9-14900K, 256×256 image):
 
-| Method | Description | Speed | Size |
-|---|---|---|---|
-| 0 | I16 with DC_PRED only | ~1.2 ms (218 MP/s) | largest |
-| 1 | I16 with 4-mode SSE search (DC/V/H/TM) | ~1.7 ms (154 MP/s) | baseline |
-| 2 | B_PRED with 10 I4 modes per 4×4 sub-block | ~1.8 ms (145 MP/s) | good on textures |
-| 3 | Per-MB I16 vs B_PRED arbitration **(recommended)** | ~2.4 ms (109 MP/s) | best |
+| Method | Description | Speed | File size | Quality |
+|---|---|---|---|---|
+| 0 | I16 with DC_PRED only | ~1.2 ms | largest | baseline |
+| 1 | I16 with 4-mode SSE search (DC/V/H/TM) | ~1.7 ms | baseline | +1-3 dB |
+| 2 | B_PRED with 10 I4 modes per 4×4 sub-block | ~1.8 ms | good on textures | +2-5 dB |
+| 3 | Per-MB I16/B_PRED arbitration (prediction-SSE) | ~2.4 ms | smallest | **recommended** |
+| 4 | Per-MB arbitration with I16 reconstruction RDO | ~10 ms | 10-30% larger | +1-3 dB over M3 |
 
-Encoding is goroutine-safe — each `Encode` call is self-contained and
-has no shared mutable state. Higher method levels (4–6) are accepted
-and currently behave like 3; they're reserved for future RDO / trellis
+`Method=3` is the size/speed/quality sweet spot for most use cases.
+`Method=4` trades 4× slower encoding for higher PSNR when quality
+matters more than file size. Higher method levels (5–6) are accepted
+and currently behave like 4; reserved for future trellis
 quantization work.
+
+Encoding is goroutine-safe — each `Encode` call is self-contained
+and has no shared mutable state.
 
 Here’s a simple example of how to encode an animation:
 ```Go
