@@ -28,7 +28,7 @@ func TestEncodePSNR(t *testing.T) {
 		// minPSNRY is the luma-only PSNR computed against the spec's
 		// limited-range BT.601, which is the actual encoder quality.
 		{"q90-method-1", 90, 1, 28, 45},
-		{"q75-method-1", 75, 1, 25, 40},
+		{"q75-method-1", 75, 1, 25, 39},
 		{"q50-method-1", 50, 1, 22, 35},
 		{"q90-method-2", 90, 2, 28, 45},
 		{"q75-method-2", 75, 2, 25, 40},

@@ -437,8 +437,9 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 
 	// 7. Quantize Y2 block.
 	var y2Q, y2DQ [16]int16
-	dz := int32(0)
-	QuantizeBlock(y2Coef[:], y2Q[:], y2DQ[:], s.quant.Y2[0], s.quant.Y2[1], dz)
+	// Y2 holds only DC values (the WHT of Y sub-block DCs), so all 16
+	// entries are "DC-like" and should use the DC deadzone.
+	QuantizeBlockSplit(y2Coef[:], y2Q[:], y2DQ[:], s.quant.Y2[0], s.quant.Y2[1], 0, 0)
 
 	// 8. Quantize Y1 AC (skipping DC — it's in Y2).
 	var y1Q, y1DQ [16][16]int16
@@ -448,9 +449,9 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 		// coeffs. However the dequantized DC for reconstruction comes
 		// from the Y2 block (below).
 		yCoef[s_][0] = 0
-		dzAC := int32(0)
-		QuantizeBlock(yCoef[s_][:], y1Q[s_][:], y1DQ[s_][:],
-			s.quant.Y1[0], s.quant.Y1[1], dzAC)
+		// DC was zeroed; AC gets a moderate deadzone to save entropy.
+		QuantizeBlockSplit(yCoef[s_][:], y1Q[s_][:], y1DQ[s_][:],
+			s.quant.Y1[0], s.quant.Y1[1], 0, int32(s.quant.Y1[1])/4)
 	}
 
 	// 9. Chroma: Cb then Cr (4 blocks each).
@@ -723,8 +724,10 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 				res[k] = int16(src[k]) - int16(bestPred[k])
 			}
 			FDCT4x4(res[:], coef[:])
-			dzAC := int32(0)
-			QuantizeBlock(coef[:], yQ[sj*4+si][:], dq[:], s.quant.Y1[0], s.quant.Y1[1], dzAC)
+			// B_PRED has no Y2, so the DC of each 4x4 block IS emitted
+			// through Y1SansY2. DC gets no deadzone; AC gets moderate.
+			QuantizeBlockSplit(coef[:], yQ[sj*4+si][:], dq[:],
+				s.quant.Y1[0], s.quant.Y1[1], 0, int32(s.quant.Y1[1])/4)
 
 			// Reconstruct (needed for subsequent sub-blocks' prediction).
 			var resRec [16]int16
@@ -892,11 +895,10 @@ func (s *encState) quantizeMBChroma(mbx, mby int, uvMode int) (*[4][16]int16, *[
 			}
 			FDCT4x4(cbRes[:], cbCoef[:])
 			FDCT4x4(crRes[:], crCoef[:])
-			dzUV := int32(0)
-			QuantizeBlock(cbCoef[:], cbQ[subIdx][:], cbDQ[subIdx][:],
-				s.quant.UV[0], s.quant.UV[1], dzUV)
-			QuantizeBlock(crCoef[:], crQ[subIdx][:], crDQ[subIdx][:],
-				s.quant.UV[0], s.quant.UV[1], dzUV)
+			QuantizeBlockSplit(cbCoef[:], cbQ[subIdx][:], cbDQ[subIdx][:],
+				s.quant.UV[0], s.quant.UV[1], 0, int32(s.quant.UV[1])/4)
+			QuantizeBlockSplit(crCoef[:], crQ[subIdx][:], crDQ[subIdx][:],
+				s.quant.UV[0], s.quant.UV[1], 0, int32(s.quant.UV[1])/4)
 		}
 	}
 

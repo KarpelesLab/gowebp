@@ -266,17 +266,29 @@ func NewQuantizer(qi int) Quantizer {
 }
 
 // QuantizeBlock performs deadzone quantization of 16 coefficients given
-// (dcFactor, acFactor) dequant values and a deadzone bias. It writes the
-// quantized integer coefficients to qOut and the reconstructed (dequantized)
-// coefficients to dqOut. Returns the end-of-block index (1 + position of
-// last non-zero coefficient in zigzag order) or 0 for an all-zero block.
+// (dcFactor, acFactor) dequant values and a uniform deadzone bias. It
+// writes the quantized integer coefficients to qOut and the
+// reconstructed (dequantized) coefficients to dqOut. Returns the
+// end-of-block index (1 + position of last non-zero coefficient in
+// zigzag order) or 0 for an all-zero block.
 //
-// deadzone is a bias subtracted from the absolute coefficient value before
-// division. A typical choice is factor/4 for "lossy" mode; larger values
-// increase zeros (smaller files, lower quality).
+// For per-position deadzone tuning (smaller bias on DC, larger on AC),
+// use QuantizeBlockSplit instead.
 func QuantizeBlock(
 	coef []int16, qOut []int16, dqOut []int16,
 	dcFactor, acFactor uint16, deadzone int32,
+) int {
+	return QuantizeBlockSplit(coef, qOut, dqOut, dcFactor, acFactor, deadzone, deadzone)
+}
+
+// QuantizeBlockSplit performs deadzone quantization with separate
+// deadzones for DC (zigzag position 0) and AC (all other positions).
+// Typical use: dcDeadzone=0 (preserve DC accuracy, critical for
+// perceived color and brightness) and acDeadzone=acFactor/4 (zero
+// out small AC noise, saves entropy bits at little perceptual cost).
+func QuantizeBlockSplit(
+	coef []int16, qOut []int16, dqOut []int16,
+	dcFactor, acFactor uint16, dcDeadzone, acDeadzone int32,
 ) int {
 	_ = coef[15]
 	_ = qOut[15]
@@ -285,8 +297,10 @@ func QuantizeBlock(
 	for i := 0; i < 16; i++ {
 		rc := Zigzag4x4[i]
 		f := int32(acFactor)
+		deadzone := acDeadzone
 		if rc == 0 {
 			f = int32(dcFactor)
+			deadzone = dcDeadzone
 		}
 		c := int32(coef[rc])
 		sign := int32(1)
