@@ -3,223 +3,170 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/KarpelesLab/gowebp.svg)](https://pkg.go.dev/github.com/KarpelesLab/gowebp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-# Native WebP for Go
+# gowebp
 
-This is a native WebP encoder written entirely in Go, with **no dependencies on libwebp** or other external libraries. Designed for performance and efficiency, this encoder generates smaller files than the standard Go PNG encoder and is approximately **50% faster** in execution.
+A pure-Go WebP codec. No `libwebp`, no `cgo`, no runtime dependencies
+beyond `golang.org/x/image` (which is used for decoding only).
 
-Supported output formats:
+Encodes to either WebP format:
 
-- **VP8L (lossless)** — default, used when `Options.Lossy` is false or
-  `Options` is nil. Preserves every pixel exactly.
-- **VP8 (lossy)** — enabled by `Options.Lossy = true`. Pure-Go VP8
-  keyframe encoder supporting I16 (4 modes), B_PRED (10 I4 modes per
-  4×4 sub-block), UV8 chroma prediction, DCT + Walsh-Hadamard
-  transforms, round-to-nearest quantization, context-adaptive boolean
-  arithmetic coding of coefficient tokens, the decoder-side loop
-  filter, and per-MB I16/B_PRED arbitration at Method=3.
+- **VP8L (lossless)** — default. Every pixel preserved exactly.
+- **VP8 (lossy)** — opt-in via `Options.Lossy`. Full intra-only VP8
+  keyframe encoder with I16 + B_PRED + UV8 intra prediction, DCT +
+  Walsh-Hadamard transforms, boolean arithmetic coding, loop filter,
+  and reconstruction-based RD mode selection.
 
-  Measured RGB-PSNR (spec-correct, limited-range BT.601) on smooth
-  content: ~41 dB at Q=90, ~40 dB at Q=75, ~32 dB at Q=50 — visually
-  lossless at high Q and comparable to `cwebp` within a few dB. Files
-  are roughly 1.5–3× `cwebp`'s size at the same quality setting;
-  closing that gap with full rate-distortion optimization and trellis
-  quantization is future work.
-
-  **BT.601 range note**: VP8 uses limited-range BT.601 YCbCr
-  (luma 16–235) per RFC 6386. Go's stdlib `image/color.YCbCrToRGB`
-  uses JFIF full-range BT.601, so when you decode a lossy WebP with
-  `golang.org/x/image/webp` and convert to RGB via `.At().RGBA()`,
-  colors shift 2–5 units per channel — making Go's naive RGB-PSNR
-  look like ~28 dB even on near-perfect output. Real VP8 decoders
-  (libwebp, browsers) apply the correct inverse and show the
-  encoder's true quality. This is a Go stdlib issue, not an encoder
-  bug.
-- **Animation (ANIM/ANMF)** — supported for both VP8L and VP8 frames.
-  `EncodeAll` respects `Options.Lossy` per-animation.
-
-## Decoding Support
-
-We provide WebP decoding through a wrapper around `golang.org/x/image/webp`, with an additional `DecodeIgnoreAlphaFlag` function to handle VP8X images where the alpha flag causes decoding issues.
-## Benchmark
-
-We conducted a quick benchmark to showcase file size reduction and encoding performance. Using an image from Google’s WebP Lossless and Alpha Gallery, we compared the results of our gowebp encoder with the standard PNG encoder. <br/><br/>
-For the PNG encoder, we applied the `png.BestCompression` setting to achieve the most competitive compression outcomes.
-<br/><br/>
-
-<table align="center">
-  <tr>
-    <th></th>
-    <th></th>
-    <th>PNG encoder</th>
-    <th>nativeWebP encoder</th>
-    <th>reduction</th>
-  </tr>
-  <tr>
-    <td rowspan="2" height="110px"><p align="center"><img src="https://www.gstatic.com/webp/gallery3/1.png" height="100px"></p></td>
-    <td>file size</td>
-    <td>120 kb</td>
-    <td>96 kb</td>
-    <td>20% smaller</td>
-  </tr>
-  <tr>
-    <td>encoding time</td>
-    <td>42945049 ns/op</td>
-    <td>27716447 ns/op</td>
-    <td>35% faster</td>
-  </tr>
-  <tr>
-    <td rowspan="2" height="110px"><p align="center"><img src="https://www.gstatic.com/webp/gallery3/2.png" height="100px"></p></td>
-    <td>file size</td>
-    <td>46 kb</td>
-    <td>36 kb</td>
-    <td>22% smaller</td>
-  </tr>
-  <tr>
-    <td>encoding time</td>
-    <td>98509399 ns/op</td>
-    <td>31461759 ns/op</td>
-    <td>68% faster</td>
-  </tr>
-  <tr>
-    <td rowspan="2" height="110px"><p align="center"><img src="https://www.gstatic.com/webp/gallery3/3.png" height="100px"></p></td>
-    <td>file size</td>
-    <td>236 kb</td>
-    <td>194 kb</td>
-    <td>18% smaller</td>
-  </tr>
-  <tr>
-    <td>encoding time</td>
-    <td>178205535 ns/op</td>
-    <td>102454192 ns/op</td>
-    <td>43% faster</td>
-  </tr>
-  <tr>
-    <td rowspan="2" height="110px"><p align="center"><img src="https://www.gstatic.com/webp/gallery3/4.png" height="60px"></p></td>
-    <td>file size</td>
-    <td>53 kb</td>
-    <td>41 kb</td>
-    <td>23% smaller</td>
-  </tr>
-  <tr>
-    <td>encoding time</td>
-    <td>29088555 ns/op</td>
-    <td>14959849 ns/op</td>
-    <td>49% faster</td>
-  </tr>
-  <tr>
-    <td rowspan="2" height="110px"><p align="center"><img src="https://www.gstatic.com/webp/gallery3/5.png" height="100px"></p></td>
-    <td>file size</td>
-    <td>139 kb</td>
-    <td>123 kb</td>
-    <td>12% smaller</td>
-  </tr>
-  <tr>
-    <td>encoding time</td>
-    <td>63423995 ns/op</td>
-    <td>21717392 ns/op</td>
-    <td>66% faster</td>
-  </tr>
-</table>
-<p align="center">
-<sub>image source: https://developers.google.com/speed/webp/gallery2</sub>
-</p>
-
+Also encodes WebP **animations** (ANIM/ANMF) with either codec, and
+preserves **alpha channels** via ALPH chunks (raw or VP8L-compressed,
+static or in-animation).
 
 ## Installation
 
-To install the gowebp package, use the following command:
-```Bash
+```bash
 go get github.com/KarpelesLab/gowebp
 ```
+
 ## Usage
 
-Here’s a simple example of how to encode an image losslessly (VP8L):
-```Go
-file, err := os.Create(name)
-if err != nil {
-  log.Fatalf("Error creating file %s: %v", name, err)
-}
-defer file.Close()
+### Lossless
 
-err = gowebp.Encode(file, img, nil)
-if err != nil {
-  log.Fatalf("Error encoding image to WebP: %v", err)
+```go
+import "github.com/KarpelesLab/gowebp"
+
+f, _ := os.Create(name)
+defer f.Close()
+if err := gowebp.Encode(f, img, nil); err != nil {
+    log.Fatal(err)
 }
 ```
 
-Or encode with lossy VP8 compression:
-```Go
-err = gowebp.Encode(file, img, &gowebp.Options{
-  Lossy:   true,
-  Quality: 75, // 0 (smallest) to 100 (best); 75 is a reasonable default
-  Method:  3,  // speed/quality tradeoff
+### Lossy
+
+```go
+err := gowebp.Encode(f, img, &gowebp.Options{
+    Lossy:   true,
+    Quality: 75, // 0 (smallest) to 100 (best), default 75
+    Method:  4,  // 0 (fastest) to 6 (highest quality), default 0
 })
 ```
 
-Method levels (measured on i9-14900K, 256×256 image):
+### Animation
 
-| Method | Description | Speed | File size | Quality |
-|---|---|---|---|---|
-| 0 | I16 with DC_PRED only | fastest | baseline | baseline |
-| 1 | I16 with 4-mode SSE search (DC/V/H/TM) | +40% | = | +1-3 dB |
-| 2 | B_PRED with 10 I4 modes per 4×4 sub-block | +55% | +5% | +2-5 dB |
-| 3 | Per-MB I16/B_PRED arbitration (prediction-SSE) | 2× | slightly smaller | good default |
-| 4 | Per-MB arbitration with I16 reconstruction RDO | 2.5× | smallest | **recommended** |
-| 5 | Dual-path arbitration (both sides measured) | 2.8× | = | reference |
-| 6 | Adds trailing-coefficient trellis trim | 2.9× | ≤ M5 | for textured content |
-
-On natural content, `Method=4` produces both smaller files AND higher
-PSNR than Method=3, at a reasonable speed overhead. It's recommended
-for most use cases. Method=5 is a more principled but rarely-
-different reference; Method=6 adds a simple trellis that helps on
-textured content where post-quantization noise survives. Higher
-levels (>6) currently behave like 6.
-
-Encoding is goroutine-safe — each `Encode` call is self-contained
-and has no shared mutable state.
-
-Here’s a simple example of how to encode an animation:
-```Go
-file, err := os.Create(name)
-if err != nil {
-  log.Fatalf("Error creating file %s: %v", name, err)
-}
-defer file.Close()
-
+```go
 ani := gowebp.Animation{
-  Images: []image.Image{
-    frame1,
-    frame2,
-  },
-  Durations: []uint {
-    100,
-    100,
-  },
-  Disposals: []uint {
-    0,
-    0,
-  },
-  LoopCount: 0,
-  BackgroundColor: 0xffffffff,
+    Images:          []image.Image{frame1, frame2, frame3},
+    Durations:       []uint{100, 100, 100}, // ms per frame
+    Disposals:       []uint{0, 0, 0},       // 0=keep, 1=clear
+    LoopCount:       0,                     // 0 = infinite
+    BackgroundColor: 0xffffffff,            // BGRA
 }
-
-err = gowebp.EncodeAll(file, &ani, nil)
-if err != nil {
-  log.Fatalf("Error encoding WebP animation: %v", err)
-}
+// Pass Options{Lossy: true} for VP8 frames; nil for VP8L.
+gowebp.EncodeAll(f, &ani, nil)
 ```
 
-Pass `&gowebp.Options{Lossy: true, Quality: 75}` to `EncodeAll` to
-produce an animation whose frames use VP8 (lossy) instead of VP8L.
+### Decoding
 
-## Implementation notes and references
+```go
+img, err := gowebp.Decode(r)
+```
 
-The VP8 encoder in `internal/vp8enc/` is a pure-Go implementation built
-against the **RFC 6386** specification (*The VP8 Data Format and
-Decoding Guide*). The following open-source implementations were
-consulted as references for bit-exact roundtrip compatibility; no code
-was copied, but table values (which are specification constants) were
-transcribed:
+Wraps `golang.org/x/image/webp`. Also provides `DecodeIgnoreAlphaFlag`
+for VP8X files where a misset alpha flag trips up the standard
+decoder.
+
+## Lossy method tiers
+
+The `Method` field picks between different speed/quality/size
+tradeoffs. Higher values spend more CPU per macroblock to produce
+smaller or higher-quality output.
+
+| Method | Strategy | Notes |
+|---|---|---|
+| 0 | I16 with DC_PRED only | fastest baseline |
+| 1 | I16 with 4-mode SSE search | +1–3 dB over M0 |
+| 2 | B_PRED with 10 I4 modes per sub-block | best on textured content |
+| 3 | Per-MB I16/B_PRED arbitration (prediction SSE) | fast, good default |
+| 4 | Per-MB arbitration with reconstruction-aware RDO | **recommended** |
+| 5 | Dual-path (measure both I16 and B_PRED) | principled reference |
+| 6 | Adds trailing-coefficient trellis trim | helps on high-freq content |
+
+Encoding is goroutine-safe: each `Encode`/`EncodeAll` call is
+self-contained and has no shared mutable state.
+
+## Benchmarks
+
+Measured on Intel i9-14900K (Linux, Go 1.25) against the 5 natural
+photos linked from [Google's WebP Gallery](https://developers.google.com/speed/webp/gallery2).
+Baseline is Go's `image/png` with `png.BestCompression`.
+
+Reproduce:
+
+```bash
+NATIVEWEBP_FETCH=1 go test -run TestGalleryPSNR -v    # populate testdata/
+go test -bench=. -benchtime=5x
+```
+
+### File sizes (bytes per frame)
+
+| Image | PNG | Lossless | Lossy Q=50 M=4 | Lossy Q=75 M=3 | Lossy Q=75 M=4 | Lossy Q=90 M=4 |
+|---|---:|---:|---:|---:|---:|---:|
+| [`1.png`](https://www.gstatic.com/webp/gallery3/1.png) (400×301) | 120 188 | **97 720** | 16 766 | 17 648 | 24 906 | 43 518 |
+| [`2.png`](https://www.gstatic.com/webp/gallery3/2.png) (386×395) | 45 659 | **37 018** | 15 050 | 13 808 | 21 888 | 33 632 |
+| [`3.png`](https://www.gstatic.com/webp/gallery3/3.png) (800×600) | 236 018 | **194 714** | 80 992 | 80 552 | 95 330 | 130 828 |
+| [`4.png`](https://www.gstatic.com/webp/gallery3/4.png) (421×163) | 52 681 | **41 554** | 27 304 | 24 838 | 35 736 | 47 510 |
+| [`5.png`](https://www.gstatic.com/webp/gallery3/5.png) (300×300) | 138 919 | **123 932** | 74 202 | 78 300 | 97 588 | 133 548 |
+
+- **Lossless (VP8L)** averages 13–23 % smaller than PNG's best compression.
+- **Lossy Q=75 M=3** is 1.8×–3.3× smaller than lossless on the same images.
+- **Lossy Q=50 M=4** can reach 7× smaller than PNG while still
+  producing visually acceptable output on photos.
+
+### Encode time (ns/op)
+
+| Image | PNG | Lossless | Lossy Q=75 M=3 | Lossy Q=75 M=4 |
+|---|---:|---:|---:|---:|
+| `1.png` (400×301) | 38 034 | **25 745** | 30 476 | 30 629 |
+| `2.png` (386×395) | 82 888 | **29 999** | 34 298 | 49 051 |
+| `3.png` (800×600) | 152 804 | **100 415** | 110 645 | 117 259 |
+| `4.png` (421×163) | 23 707 | **24 294** | 17 631 | 19 426 |
+| `5.png` (300×300) | 54 435 | **20 294** | 27 094 | 27 931 |
+
+All timings in microseconds for brevity: lossless WebP is **≈ 1.5–2.8×
+faster than PNG** across the gallery, while producing smaller files.
+Lossy encoding is typically within a small constant factor of
+lossless speed.
+
+### Quality (spec-correct Y-PSNR, lossy Q=75 M=3)
+
+Y-PSNR measured against VP8 limited-range BT.601 (what a real decoder
+shows). Higher is better; >40 dB is visually lossless on photographic
+content.
+
+| Image | Y-PSNR |
+|---|---:|
+| `1.png` | 39.2 dB |
+| `2.png` | 42.2 dB |
+| `3.png` | 43.5 dB |
+| `4.png` | 38.7 dB |
+| `5.png` | 36.7 dB |
+
+Threshold floors on these numbers are asserted by `TestGalleryPSNR`
+so future encoder changes can't quietly regress quality.
+
+> **BT.601 range note.** VP8 uses limited-range BT.601 YCbCr (luma
+> 16–235) per RFC 6386. Go's stdlib `image/color.YCbCrToRGB` uses
+> JFIF full-range BT.601, so naively computing RGB-PSNR after
+> `x/image/webp.Decode` shifts 2–5 units per channel and makes the
+> output look ~28 dB even when it's actually near-lossless. Real VP8
+> decoders (libwebp, browsers) apply the correct inverse.
+
+## Implementation notes
+
+The lossy VP8 encoder lives in `internal/vp8enc/` and is a pure-Go
+implementation of **RFC 6386** (*The VP8 Data Format and Decoding
+Guide*). The following open-source implementations were consulted as
+references for bit-exact compatibility; no code was copied, but table
+values (which are specification constants) were transcribed:
 
 - [`golang.org/x/image/vp8`](https://pkg.go.dev/golang.org/x/image/vp8)
   — pure-Go VP8 decoder, used as the round-trip test oracle (BSD-3-Clause).
@@ -228,6 +175,15 @@ transcribed:
 - [`libvpx`](https://chromium.googlesource.com/webm/libvpx) — VP8/VP9
   reference codec (BSD-3-Clause).
 
-Every file in `internal/vp8enc/` includes an RFC 6386 section pointer
-and cross-reference to the equivalent path in the x/image/vp8 decoder,
-which is what the encoder is verified against in the roundtrip tests.
+Every file in `internal/vp8enc/` references the relevant RFC 6386
+section and the matching path in the x/image/vp8 decoder, which is
+the oracle used by the test suite's round-trip integration tests.
+
+Remaining work (tracked in the source, not here): full rate-distortion
+optimization with calibrated λ; proper Viterbi trellis quantization
+with context-aware token-tree rate estimation.
+
+## License
+
+MIT, same as the upstream project this was forked from
+(`HugoSmits86/nativewebp`).
