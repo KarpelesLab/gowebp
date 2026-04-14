@@ -6,7 +6,20 @@
 
 This is a native WebP encoder written entirely in Go, with **no dependencies on libwebp** or other external libraries. Designed for performance and efficiency, this encoder generates smaller files than the standard Go PNG encoder and is approximately **50% faster** in execution.
 
-Currently, the encoder supports only WebP lossless images (VP8L).
+Supported output formats:
+
+- **VP8L (lossless)** — default, used when `Options.Lossy` is false or
+  `Options` is nil. Preserves every pixel exactly.
+- **VP8 (lossy)** — enabled by `Options.Lossy = true`. Pure-Go VP8
+  keyframe encoder supporting I16 (4 modes) and B_PRED (10 I4 modes per
+  4×4 sub-block) intra prediction with SSE-based mode selection, DCT +
+  Walsh-Hadamard transforms, deadzone quantization, and context-adaptive
+  boolean arithmetic coding of coefficient tokens. File sizes are
+  roughly within 2–3× of `cwebp`'s output at the same quality setting;
+  closing that gap with full rate-distortion optimization, trellis
+  quantization, and a loop filter is ongoing work.
+- **Animation (ANIM/ANMF)** — supported for both VP8L and VP8 frames.
+  `EncodeAll` respects `Options.Lossy` per-animation.
 
 ## Decoding Support
 
@@ -104,7 +117,7 @@ go get github.com/HugoSmits86/nativewebp
 ```
 ## Usage
 
-Here’s a simple example of how to encode an image:
+Here’s a simple example of how to encode an image losslessly (VP8L):
 ```Go
 file, err := os.Create(name)
 if err != nil {
@@ -116,6 +129,16 @@ err = nativewebp.Encode(file, img, nil)
 if err != nil {
   log.Fatalf("Error encoding image to WebP: %v", err)
 }
+```
+
+Or encode with lossy VP8 compression:
+```Go
+err = nativewebp.Encode(file, img, &nativewebp.Options{
+  Lossy:   true,
+  Quality: 75, // 0 (smallest) to 100 (best); 75 is a reasonable default
+  Method:  2,  // 0 = fastest/I16-DC-only, 1 = I16 with mode search,
+               // 2 = B_PRED with 10 I4 modes per sub-block
+})
 ```
 
 Here’s a simple example of how to encode an animation:
@@ -148,3 +171,26 @@ if err != nil {
   log.Fatalf("Error encoding WebP animation: %v", err)
 }
 ```
+
+Pass `&nativewebp.Options{Lossy: true, Quality: 75}` to `EncodeAll` to
+produce an animation whose frames use VP8 (lossy) instead of VP8L.
+
+## Implementation notes and references
+
+The VP8 encoder in `internal/vp8enc/` is a pure-Go implementation built
+against the **RFC 6386** specification (*The VP8 Data Format and
+Decoding Guide*). The following open-source implementations were
+consulted as references for bit-exact roundtrip compatibility; no code
+was copied, but table values (which are specification constants) were
+transcribed:
+
+- [`golang.org/x/image/vp8`](https://pkg.go.dev/golang.org/x/image/vp8)
+  — pure-Go VP8 decoder, used as the round-trip test oracle (BSD-3-Clause).
+- [`libwebp`](https://chromium.googlesource.com/webm/libwebp) — the
+  reference C encoder/decoder from Google (BSD-3-Clause).
+- [`libvpx`](https://chromium.googlesource.com/webm/libvpx) — VP8/VP9
+  reference codec (BSD-3-Clause).
+
+Every file in `internal/vp8enc/` includes an RFC 6386 section pointer
+and cross-reference to the equivalent path in the x/image/vp8 decoder,
+which is what the encoder is verified against in the roundtrip tests.
