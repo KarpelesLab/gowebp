@@ -224,6 +224,65 @@ func TestEncodeLossyRGBA(t *testing.T) {
     }
 }
 
+// TestALPHVP8LCompression verifies that the ALPH chunk uses VP8L
+// compression (method=1) for an alpha gradient, which should compress
+// well, and that the result is smaller than raw (method=0) would be.
+func TestALPHVP8LCompression(t *testing.T) {
+    w, h := 64, 64
+    src := image.NewNRGBA(image.Rect(0, 0, w, h))
+    for y := 0; y < h; y++ {
+        for x := 0; x < w; x++ {
+            src.SetNRGBA(x, y, color.NRGBA{128, 128, 128, uint8((x * 255) / w)})
+        }
+    }
+    var buf bytes.Buffer
+    if err := Encode(&buf, src, &Options{Lossy: true, Quality: 75}); err != nil {
+        t.Fatalf("Encode: %v", err)
+    }
+    data := buf.Bytes()
+    // Find ALPH chunk and read the first byte after "ALPH"+size.
+    idx := bytes.Index(data, []byte("ALPH"))
+    if idx < 0 {
+        t.Fatalf("no ALPH chunk")
+    }
+    size := uint32(data[idx+4]) | uint32(data[idx+5])<<8 |
+        uint32(data[idx+6])<<16 | uint32(data[idx+7])<<24
+    method := data[idx+8] & 0x03
+    t.Logf("ALPH chunk: size=%d, method=%d (0=raw, 1=VP8L), raw-equivalent=%d",
+        size, method, 1+w*h)
+    if method != 1 {
+        t.Errorf("expected ALPH method=1 for compressible alpha gradient, got %d", method)
+    }
+    // Size sanity: compressed alpha should be notably smaller than raw.
+    rawSize := uint32(1 + w*h)
+    if size >= rawSize {
+        t.Errorf("ALPH size %d not smaller than raw %d", size, rawSize)
+    }
+    // Roundtrip must still be exact.
+    decoded, err := xwebp.Decode(bytes.NewReader(data))
+    if err != nil {
+        t.Fatalf("decode: %v", err)
+    }
+    maxAErr := 0
+    for y := 0; y < h; y++ {
+        for x := 0; x < w; x++ {
+            _, _, _, a := decoded.At(x, y).RGBA()
+            want := uint8((x * 255) / w)
+            got := uint8(a >> 8)
+            d := int(got) - int(want)
+            if d < 0 {
+                d = -d
+            }
+            if d > maxAErr {
+                maxAErr = d
+            }
+        }
+    }
+    if maxAErr > 1 {
+        t.Errorf("alpha PSNR loss: max error %d", maxAErr)
+    }
+}
+
 // TestEncodeLossyOpaqueNoALPH verifies that a fully-opaque input (alpha
 // channel all 0xff) uses the simple VP8-only container without an
 // unnecessary VP8X + ALPH overhead.

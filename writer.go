@@ -158,21 +158,64 @@ func writeChunkVP8(buf *bytes.Buffer, payload []byte) {
     }
 }
 
-// writeChunkALPH emits an ALPH sub-chunk with the raw alpha plane.
-// Uses method=0 (uncompressed) and filter=0 (none); preprocessing=0.
-// The header byte layout is RRMMFFCC where CC is compression, FF is
-// filter, MM is preprocessing (RFC: WebP container spec "Alpha").
+// writeChunkALPH emits an ALPH sub-chunk. When VP8L-compressed alpha is
+// smaller than raw, we use method=1 (VP8L with alpha stored in the
+// green channel); otherwise method=0 (raw alpha plane). Filter and
+// preprocessing are always 0 in the current implementation.
+//
+// Header byte layout is RRMMFFCC where CC is compression method, FF is
+// filter, MM is preprocessing, RR is reserved (must be 0).
 func writeChunkALPH(buf *bytes.Buffer, bounds image.Rectangle, alpha []byte) {
-    payloadLen := 1 + len(alpha) // 1 header byte + raw alpha plane
+    body, method := encodeAlphaPayload(alpha, bounds.Dx(), bounds.Dy())
+    payloadLen := 1 + len(body)
     buf.Write([]byte("ALPH"))
     binary.Write(buf, binary.LittleEndian, uint32(payloadLen))
-    // Header byte: method=0 (uncompressed), filter=0 (none),
-    // preprocessing=0, reserved=0.
-    buf.WriteByte(0x00)
-    buf.Write(alpha)
+    buf.WriteByte(byte(method))
+    buf.Write(body)
     if payloadLen&1 == 1 {
         buf.WriteByte(0)
     }
+}
+
+// encodeAlphaPayload returns the alpha-plane bytes to embed in an ALPH
+// chunk along with the compression-method value (0 or 1) to put in the
+// header byte. Tries VP8L first; falls back to raw if it's not smaller.
+func encodeAlphaPayload(alpha []byte, w, h int) ([]byte, int) {
+    compressed, err := encodeAlphaVP8L(alpha, w, h)
+    if err == nil && len(compressed) < len(alpha) {
+        return compressed, 1
+    }
+    return alpha, 0
+}
+
+// encodeAlphaVP8L produces a VP8L-compressed alpha plane suitable for
+// embedding in an ALPH chunk with compression method 1. The plane is
+// encoded as a synthetic NRGBA image whose green channel carries the
+// alpha values; the decoder reads only the green channel out of the
+// VP8L sub-image.
+//
+// The 5-byte VP8L header (magic + dimensions + alpha flag + version) is
+// stripped from the output because the ALPH decoder synthesizes that
+// header from the VP8X-level dimensions.
+func encodeAlphaVP8L(alpha []byte, w, h int) ([]byte, error) {
+    img := image.NewNRGBA(image.Rect(0, 0, w, h))
+    for y := 0; y < h; y++ {
+        for x := 0; x < w; x++ {
+            img.Pix[(y*w+x)*4+1] = alpha[y*w+x] // green = alpha
+            img.Pix[(y*w+x)*4+3] = 0xff         // fully opaque
+        }
+    }
+    stream, _, err := writeBitStream(img)
+    if err != nil {
+        return nil, err
+    }
+    b := stream.Bytes()
+    if len(b) < 5 {
+        return nil, errors.New("VP8L stream too short for alpha payload")
+    }
+    // Strip the 5-byte VP8L header; the decoder re-synthesizes it from
+    // VP8X dimensions when parsing the ALPH chunk.
+    return b[5:], nil
 }
 
 // EncodeAll writes the provided animation sequence to the specified io.Writer in WebP format.
