@@ -153,12 +153,32 @@ content.
 Threshold floors on these numbers are asserted by `TestGalleryPSNR`
 so future encoder changes can't quietly regress quality.
 
-> **BT.601 range note.** VP8 uses limited-range BT.601 YCbCr (luma
-> 16–235) per RFC 6386. Go's stdlib `image/color.YCbCrToRGB` uses
-> JFIF full-range BT.601, so naively computing RGB-PSNR after
-> `x/image/webp.Decode` shifts 2–5 units per channel and makes the
-> output look ~28 dB even when it's actually near-lossless. Real VP8
-> decoders (libwebp, browsers) apply the correct inverse.
+## BT.601 color handling
+
+VP8 stores pixels in limited-range BT.601 YCbCr (luma 16–235, chroma
+16–240) per RFC 6386. Go's stdlib `image/color.YCbCrToRGB` uses the
+JFIF full-range inverse, which shifts the resulting RGB by 2–5 units
+per channel when applied to VP8 samples.
+
+`Decode` handles this automatically: for VP8 sources the returned
+image is a `*gowebp.BT601YCbCr` (or `*gowebp.BT601NYCbCrA` when the
+source has an ALPH chunk) whose `At()` method uses the spec-correct
+limited-range BT.601 inverse. Calling `img.At(x, y).RGBA()` gives the
+same RGB values a libwebp or browser decoder would produce.
+
+Users who want the raw `*image.YCbCr` for zero-copy plane access
+can type-assert to `*gowebp.BT601YCbCr` and read the embedded field:
+
+```go
+img, _ := gowebp.Decode(r)
+if y, ok := img.(*gowebp.BT601YCbCr); ok {
+    rawYCbCr := y.YCbCr     // *image.YCbCr with limited-range samples
+    _ = rawYCbCr
+}
+```
+
+VP8L (lossless) sources decode to `*image.NRGBA` with exact pixel
+fidelity and don't go through YCbCr, so no wrapping is applied.
 
 ## Implementation notes
 

@@ -24,16 +24,36 @@ func init() {
 
 // Decode reads a WebP image from the provided io.Reader and returns it as an image.Image.
 //
-// This function is a wrapper around the underlying WebP decode package (golang.org/x/image/webp).
-// It supports both lossy and lossless WebP formats, decoding the image accordingly.
+// For VP8L (lossless) sources the returned image is an *image.NRGBA (or
+// compatible) from the underlying x/image/webp decoder. For VP8 (lossy)
+// sources it is wrapped as a *BT601YCbCr (or *BT601NYCbCrA when the
+// source has an ALPH chunk) so that img.At(x, y).RGBA() produces the
+// colors a spec-compliant VP8 decoder would show; Go's stdlib
+// color.YCbCrToRGB uses JFIF full-range math which shifts VP8 pixels
+// by several units per channel.
 //
-// Parameters:
-//   r - The source io.Reader containing the WebP encoded image.
-//
-// Returns:
-//   The decoded image as image.Image or an error if the decoding fails.
+// Callers that specifically need the raw *image.YCbCr / *image.NYCbCrA
+// (e.g. for zero-copy plane access) can type-assert to *BT601YCbCr
+// or *BT601NYCbCrA and read the embedded field.
 func Decode(r io.Reader) (image.Image, error) {
-    return decoderWebP.Decode(r)
+    img, err := decoderWebP.Decode(r)
+    if err != nil {
+        return nil, err
+    }
+    return wrapBT601(img), nil
+}
+
+// wrapBT601 wraps *image.YCbCr / *image.NYCbCrA results in BT.601-
+// limited-range types. Other image types (notably the NRGBA that
+// VP8L decoding produces) pass through unchanged.
+func wrapBT601(img image.Image) image.Image {
+    switch m := img.(type) {
+    case *image.YCbCr:
+        return &BT601YCbCr{YCbCr: m}
+    case *image.NYCbCrA:
+        return &BT601NYCbCrA{NYCbCrA: m}
+    }
+    return img
 }
 
 // DecodeConfig reads the image configuration from the provided io.Reader without fully decoding the image.
@@ -85,5 +105,9 @@ func DecodeIgnoreAlphaFlag(r io.Reader) (image.Image, error) {
         }
     }
 
-    return decoderWebP.Decode(bytes.NewReader(data))
+    img, err := decoderWebP.Decode(bytes.NewReader(data))
+    if err != nil {
+        return nil, err
+    }
+    return wrapBT601(img), nil
 }
