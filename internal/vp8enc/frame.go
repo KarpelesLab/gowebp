@@ -756,10 +756,11 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 	}
 
 	// UV: predict + transform + quantize, still deferred emission.
-	cbQ, crQ := s.quantizeMBChroma(mbx, mby, uvMode)
+	var cbQ, crQ [4][16]int16
+	s.quantizeMBChroma(mbx, mby, uvMode, &cbQ, &crQ)
 
 	// Decide skip over the full MB.
-	skip := blocksAllZero16(&yQ) && blocksAllZero4(cbQ) && blocksAllZero4(crQ)
+	skip := blocksAllZero16(&yQ) && blocksAllZero4(&cbQ) && blocksAllZero4(&crQ)
 
 	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{
 		isI16: false, skip: skip, i4Modes: modes, uvMode: uvMode,
@@ -798,7 +799,7 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 	s.upNZ[mbx] = (s.upNZ[mbx] & 0xf0) | newUpY
 
 	// UV token emission from the already-quantized blocks.
-	s.emitMBChromaTokens(mbx, cbQ, crQ)
+	s.emitMBChromaTokens(mbx, &cbQ, &crQ)
 }
 
 // buildI4Neighbors fills (tl, top, left) for the sub-block at position
@@ -873,7 +874,7 @@ func (s *encState) buildI4Neighbors(tl *byte, top *[8]byte, left *[4]byte,
 // quantization, and reconstruction for one MB — but does NOT emit
 // tokens. Returns the quantized Cb and Cr blocks so the caller can
 // decide whether to emit tokens (skip=0) or suppress them (skip=1).
-func (s *encState) quantizeMBChroma(mbx, mby int, uvMode int) (*[4][16]int16, *[4][16]int16) {
+func (s *encState) quantizeMBChroma(mbx, mby int, uvMode int, cbQ, crQ *[4][16]int16) {
 	var cbTop, cbLeft [8]byte
 	cbHasTop := s.getUVTopRow('U', mbx, mby, &cbTop)
 	cbHasLeft := s.getUVLeftCol('U', mbx, mby, &cbLeft)
@@ -888,8 +889,6 @@ func (s *encState) quantizeMBChroma(mbx, mby int, uvMode int) (*[4][16]int16, *[
 	var crPred [64]byte
 	PredictUV8(&crPred, uvMode, &crTop, &crLeft, crTL, crHasTop, crHasLeft)
 
-	cbQ := new([4][16]int16)
-	crQ := new([4][16]int16)
 	var cbDQ, crDQ [4][16]int16
 	for sby := 0; sby < 2; sby++ {
 		for sbx := 0; sbx < 2; sbx++ {
@@ -933,7 +932,6 @@ func (s *encState) quantizeMBChroma(mbx, mby int, uvMode int) (*[4][16]int16, *[
 			}
 		}
 	}
-	return cbQ, crQ
 }
 
 // emitMBChromaTokens writes chroma coefficient tokens to partition 1 and
