@@ -172,6 +172,46 @@ func TestBPredBeatsI16OnTexture(t *testing.T) {
 	}
 }
 
+// BenchmarkEncode256x256 measures encode throughput on a 256x256
+// natural-ish image across the three main method levels.
+func BenchmarkEncode256x256(b *testing.B) {
+	w, h := 256, 256
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			r := uint8((x*200/w + ((x^y)&7)*4) & 0xff)
+			g := uint8((y*180/h + ((x>>3)^(y>>3))&0x1f) & 0xff)
+			bl := uint8(((x+y)*220/(w+h) + ((x*y)>>6)&0xf) & 0xff)
+			src.SetNRGBA(x, y, color.NRGBA{r, g, bl, 255})
+		}
+	}
+	cases := []struct {
+		name   string
+		method int
+	}{
+		{"method-0-I16-DC-only", 0},
+		{"method-1-I16-4modes", 1},
+		{"method-2-BPRED", 2},
+		{"method-3-arbitration", 3},
+	}
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			var buf bytes.Buffer
+			for i := 0; i < b.N; i++ {
+				buf.Reset()
+				if err := EncodeWebP(&buf, src, EncodeOptions{
+					Quality: 75,
+					Method:  c.method,
+				}); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(buf.Len()), "bytes/op")
+		})
+	}
+}
+
 // TestEncodeSolidColor verifies that a solid-color image round-trips
 // with near-perfect fidelity — the DC prediction + quantization path
 // should recover the input color cleanly.

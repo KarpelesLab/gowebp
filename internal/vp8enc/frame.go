@@ -357,16 +357,17 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 	switch {
 	case s.opts.Method >= 3:
 		// Per-MB arbitration between I16 and B_PRED. Picks whichever
-		// gives lower predictor SSE, with a small bit-count penalty for
-		// B_PRED to reflect its higher mode-coding cost.
+		// gives lower predictor-SSE + rate penalty. B_PRED gets a
+		// per-MB penalty proportional to the cost of coding 16 sub-
+		// block modes (each ~4-5 arithmetic-coded bits) plus the loss
+		// of the compact Y2-WHT DC path. At Q=75 this is about 80-100
+		// extra token bits per MB — roughly 300-400 squared-pixel
+		// units when weighted against residual energy at that quant.
 		yMode, i16SSE := s.bestI16(mbx, mby)
 		bSSE := s.estimateBPredSSE(mbx, mby)
-		// Rough penalty: each sub-block's tree-coded mode averages ~4-5
-		// bits, times 16 sub-blocks, times the bit-quant at this
-		// quality. Scale bit-penalty by a quant-derived factor.
-		bPenalty := int64(s.opts.Method) // trivial scaling hook
-		_ = bPenalty
-		if i16SSE <= bSSE {
+		qf := int64(s.quant.Y1[1])
+		bPenalty := qf * qf * 2
+		if i16SSE <= bSSE+bPenalty {
 			s.encodeI16MB(mbx, mby, yMode, uvMode)
 		} else {
 			s.encodeBPredMB(mbx, mby, uvMode)
