@@ -10,7 +10,7 @@ import (
 )
 
 // EncodeOptions carries VP8 frame-level tuning that the package-level
-// encoder wrapper translates from nativewebp.Options.
+// encoder wrapper translates from gowebp.Options.
 type EncodeOptions struct {
 	// Quality maps 0..100 to the VP8 base quantizer index; higher Quality
 	// → lower QI → finer quantization. Default 75.

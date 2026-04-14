@@ -1,4 +1,4 @@
-package nativewebp
+package gowebp
 
 import (
     //------------------------------

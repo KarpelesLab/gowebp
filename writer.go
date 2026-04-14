@@ -1,4 +1,4 @@
-package nativewebp
+package gowebp
 
 import (
     //------------------------------
@@ -20,7 +20,7 @@ import (
     //------------------------------
     //vp8 (lossy)
     //------------------------------
-    "github.com/HugoSmits86/nativewebp/internal/vp8enc"
+    "github.com/KarpelesLab/gowebp/internal/vp8enc"
 )
 
 // Options holds configuration settings for WebP encoding.

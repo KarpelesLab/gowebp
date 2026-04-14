@@ -1,5 +1,5 @@
-[![Codecov Coverage](https://codecov.io/gh/HugoSmits86/nativewebp/branch/main/graph/badge.svg)](https://codecov.io/gh/HugoSmits86/nativewebp)
-[![Go Reference](https://pkg.go.dev/badge/github.com/HugoSmits86/nativewebp.svg)](https://pkg.go.dev/github.com/HugoSmits86/nativewebp)
+[![Codecov Coverage](https://codecov.io/gh/KarpelesLab/gowebp/branch/main/graph/badge.svg)](https://codecov.io/gh/KarpelesLab/gowebp)
+[![Go Reference](https://pkg.go.dev/badge/github.com/KarpelesLab/gowebp.svg)](https://pkg.go.dev/github.com/KarpelesLab/gowebp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # Native WebP for Go
@@ -41,7 +41,7 @@ Supported output formats:
 We provide WebP decoding through a wrapper around `golang.org/x/image/webp`, with an additional `DecodeIgnoreAlphaFlag` function to handle VP8X images where the alpha flag causes decoding issues.
 ## Benchmark
 
-We conducted a quick benchmark to showcase file size reduction and encoding performance. Using an image from Google’s WebP Lossless and Alpha Gallery, we compared the results of our nativewebp encoder with the standard PNG encoder. <br/><br/>
+We conducted a quick benchmark to showcase file size reduction and encoding performance. Using an image from Google’s WebP Lossless and Alpha Gallery, we compared the results of our gowebp encoder with the standard PNG encoder. <br/><br/>
 For the PNG encoder, we applied the `png.BestCompression` setting to achieve the most competitive compression outcomes.
 <br/><br/>
 
@@ -126,9 +126,9 @@ For the PNG encoder, we applied the `png.BestCompression` setting to achieve the
 
 ## Installation
 
-To install the nativewebp package, use the following command:
+To install the gowebp package, use the following command:
 ```Bash
-go get github.com/HugoSmits86/nativewebp
+go get github.com/KarpelesLab/gowebp
 ```
 ## Usage
 
@@ -140,7 +140,7 @@ if err != nil {
 }
 defer file.Close()
 
-err = nativewebp.Encode(file, img, nil)
+err = gowebp.Encode(file, img, nil)
 if err != nil {
   log.Fatalf("Error encoding image to WebP: %v", err)
 }
@@ -148,7 +148,7 @@ if err != nil {
 
 Or encode with lossy VP8 compression:
 ```Go
-err = nativewebp.Encode(file, img, &nativewebp.Options{
+err = gowebp.Encode(file, img, &gowebp.Options{
   Lossy:   true,
   Quality: 75, // 0 (smallest) to 100 (best); 75 is a reasonable default
   Method:  3,  // speed/quality tradeoff
@@ -185,7 +185,7 @@ if err != nil {
 }
 defer file.Close()
 
-ani := nativewebp.Animation{
+ani := gowebp.Animation{
   Images: []image.Image{
     frame1,
     frame2,
@@ -202,13 +202,13 @@ ani := nativewebp.Animation{
   BackgroundColor: 0xffffffff,
 }
 
-err = nativewebp.EncodeAll(file, &ani, nil)
+err = gowebp.EncodeAll(file, &ani, nil)
 if err != nil {
   log.Fatalf("Error encoding WebP animation: %v", err)
 }
 ```
 
-Pass `&nativewebp.Options{Lossy: true, Quality: 75}` to `EncodeAll` to
+Pass `&gowebp.Options{Lossy: true, Quality: 75}` to `EncodeAll` to
 produce an animation whose frames use VP8 (lossy) instead of VP8L.
 
 ## Implementation notes and references
