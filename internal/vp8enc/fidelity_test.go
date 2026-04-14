@@ -173,6 +173,43 @@ func TestBPredBeatsI16OnTexture(t *testing.T) {
 	}
 }
 
+// TestQuality100NearLossless verifies that Q=100 (QI=0, finest
+// quantization) preserves the source image at near-lossless quality.
+// At QI=0 the dequant factors are their minimum (4 for both DC and AC),
+// so quantization error should be bounded tightly.
+func TestQuality100NearLossless(t *testing.T) {
+	w, h := 64, 64
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	// Smooth gradient — avoids aliasing artifacts from 4:2:0 chroma
+	// subsampling that would dominate at high Q.
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			src.SetNRGBA(x, y, color.NRGBA{
+				uint8(x * 255 / w),
+				uint8(y * 255 / h),
+				uint8((x + y) * 255 / (w + h)),
+				255,
+			})
+		}
+	}
+	var buf bytes.Buffer
+	if err := EncodeWebP(&buf, src, EncodeOptions{Quality: 100, Method: 3}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ycbcr := dec.(*image.YCbCr)
+	psnrY := computePSNRLimited(src, ycbcr)
+	psnrRGB := computePSNRSpec(src, ycbcr)
+	t.Logf("Q=100 near-lossless: %d bytes, Y-PSNR=%.2f dB, RGB-PSNR=%.2f dB",
+		buf.Len(), psnrY, psnrRGB)
+	if psnrY < 45 {
+		t.Errorf("Q=100 Y-PSNR %.2f below expected 45+", psnrY)
+	}
+}
+
 // TestEncodeTinyImages verifies the encoder handles the smallest
 // possible inputs correctly: 1x1 up to the first full-MB size (16x16)
 // and sizes that aren't MB-aligned.
