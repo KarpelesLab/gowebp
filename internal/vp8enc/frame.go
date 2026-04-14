@@ -72,10 +72,31 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 	WriteQuantHeader(p0, baseQ)
 	WriteRefreshEntropyProbs(p0)
 	WriteTokenProbUpdates(p0)
-	// Enable per-MB skip bit. skipProb=128 is a neutral default; real
-	// rate tuning would measure the actual skip rate across MBs and
-	// calibrate. For typical content ~10-30% of MBs can skip.
-	WriteSkipProb(p0, true, 128)
+	// Enable per-MB skip bit. We compute the actual skip rate from
+	// this frame's mode decisions and set skipProb ≈ P(skip=0) × 255,
+	// so non-skipping MBs (the common case) cost fewer bits. Clamp to
+	// a reasonable range to avoid pathological 1/255 values if a
+	// frame happens to be all-or-nothing.
+	skipped := 0
+	for _, mb := range enc.mbs {
+		if mb.skip {
+			skipped++
+		}
+	}
+	total := len(enc.mbs)
+	skipProb := uint8(160) // default for typical mixed content
+	if total > 0 {
+		nonSkipRate := float64(total-skipped) / float64(total)
+		p := int(nonSkipRate * 255)
+		if p < 8 {
+			p = 8
+		}
+		if p > 247 {
+			p = 247
+		}
+		skipProb = uint8(p)
+	}
+	WriteSkipProb(p0, true, skipProb)
 
 	// Partition-0 mode coding context. leftPredMode[j] is the last (right)
 	// column of per-sub-block I4 modes in the MB immediately to the left
@@ -87,11 +108,12 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 		leftPredMode := [4]int{ModeI4DC, ModeI4DC, ModeI4DC, ModeI4DC}
 		for mbx := 0; mbx < enc.frame.MBWidth; mbx++ {
 			mb := enc.mbs[mby*enc.frame.MBWidth+mbx]
-			// Emit skip bit first, as the decoder expects.
+			// Emit skip bit first, as the decoder expects. Must use
+			// the same skipProb we wrote to the header.
 			if mb.skip {
-				p0.WriteBit(1, 128)
+				p0.WriteBit(1, int(skipProb))
 			} else {
-				p0.WriteBit(0, 128)
+				p0.WriteBit(0, int(skipProb))
 			}
 			if mb.isI16 {
 				WriteMBModes(p0, mb.yMode, mb.uvMode)
