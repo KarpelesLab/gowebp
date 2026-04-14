@@ -385,17 +385,18 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 
 	switch {
 	case s.opts.Method >= 4:
-		// Method 4+: per-MB arbitration using RD cost (reconstruction
-		// SSE + rate term) for I16. B_PRED is still estimated by
-		// prediction-only SSE (proper RDO for B_PRED would need
-		// 16 sub-block full encodes — deferred). Use the RD cost
-		// directly on the I16 side; pad the B_PRED side with the same
-		// mode-tree overhead penalty as Method=3.
+		// Method 4+: I16 side uses full reconstruction SSE; B_PRED
+		// side uses prediction SSE plus an expected-quantization-
+		// noise correction so both sides are compared in similar
+		// units. Noise estimate is ~256 · q²/12 per MB (uniform
+		// quantization, 256 pixels), plus the mode-coding overhead
+		// penalty.
 		yMode, i16Cost := s.bestI16RD(mbx, mby)
 		bSSE := s.estimateBPredSSE(mbx, mby)
 		qf := int64(s.quant.Y1[1])
+		quantNoise := 256 * qf * qf / 12
 		bPenalty := qf * qf * 2
-		if i16Cost <= bSSE+bPenalty {
+		if i16Cost <= bSSE+quantNoise+bPenalty {
 			s.encodeI16MB(mbx, mby, yMode, uvMode)
 		} else {
 			s.encodeBPredMB(mbx, mby, uvMode)
