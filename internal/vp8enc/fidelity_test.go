@@ -24,6 +24,8 @@ func TestEncodePSNR(t *testing.T) {
 		{"q90-method-1", 90, 1, 28},
 		{"q75-method-1", 75, 1, 25},
 		{"q50-method-1", 50, 1, 22},
+		{"q90-method-2", 90, 2, 28},
+		{"q75-method-2", 75, 2, 25},
 	}
 
 	for _, c := range cases {
@@ -59,6 +61,49 @@ func TestEncodePSNR(t *testing.T) {
 					c.name, psnr, c.minPSNR)
 			}
 		})
+	}
+}
+
+// TestBPredBeatsI16OnTexture verifies that on content with high spatial
+// detail the per-sub-block I4 modes (Method=2) produce equal or better
+// PSNR than the single-block I16 modes (Method=1).
+func TestBPredBeatsI16OnTexture(t *testing.T) {
+	// 64x64 checkerboard — classic case where I4 modes excel because
+	// each 4x4 can independently pick a direction; I16 is forced to one.
+	w, h := 64, 64
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			v := uint8(255)
+			if ((x >> 2) ^ (y >> 2)) & 1 == 0 {
+				v = 32
+			}
+			src.SetNRGBA(x, y, color.NRGBA{v, v, v, 255})
+		}
+	}
+
+	var bufI16, bufBPred bytes.Buffer
+	if err := EncodeWebP(&bufI16, src, EncodeOptions{Quality: 75, Method: 1}); err != nil {
+		t.Fatalf("I16: %v", err)
+	}
+	if err := EncodeWebP(&bufBPred, src, EncodeOptions{Quality: 75, Method: 2}); err != nil {
+		t.Fatalf("B_PRED: %v", err)
+	}
+	t.Logf("I16 size: %d bytes, B_PRED size: %d bytes", bufI16.Len(), bufBPred.Len())
+
+	decI16, err := xwebp.Decode(bytes.NewReader(bufI16.Bytes()))
+	if err != nil {
+		t.Fatalf("decode I16: %v", err)
+	}
+	decBPred, err := xwebp.Decode(bytes.NewReader(bufBPred.Bytes()))
+	if err != nil {
+		t.Fatalf("decode B_PRED: %v", err)
+	}
+	psnrI16 := computePSNR(src, decI16)
+	psnrBPred := computePSNR(src, decBPred)
+	t.Logf("checkerboard PSNR — I16: %.2f dB, B_PRED: %.2f dB", psnrI16, psnrBPred)
+	if psnrBPred < psnrI16-1 {
+		t.Errorf("B_PRED PSNR %.2f substantially worse than I16 %.2f", psnrBPred, psnrI16)
 	}
 }
 

@@ -119,7 +119,107 @@ func WriteMBModes(e *BoolEncoder, predY16, predC8 int) {
 		e.WriteBit(1, 128)
 	}
 
-	// UV mode tree.
+	writeUVMode(e, predC8)
+}
+
+// WriteMBModesBPred writes the per-macroblock mode fields for a B_PRED
+// MB: usePredY16=0, 16 I4 modes (tree-coded against PredProb[above][left]),
+// then the UV mode.
+//
+// modes[j][i] is the I4 mode for sub-block at (i, j) in the MB.
+// aboveModes[i] is the mode of the sub-block above sub-block column i
+//   (bottom-row modes of the MB above, or ModeI4DC if on the frame edge).
+// leftModes is updated in place: on entry, leftModes[j] is the mode of
+//   the sub-block to the left of sub-block row j; on return, leftModes[j]
+//   holds the mode of this MB's rightmost sub-block in row j (i.e. the
+//   input context for the NEXT MB to the right).
+// aboveModes is also updated in place to reflect the bottom-row modes
+// of this MB.
+func WriteMBModesBPred(e *BoolEncoder, modes *[4][4]int, aboveModes *[4]int, leftModes *[4]int, predC8 int) {
+	e.WriteBit(0, 145) // usePredY16 = false (B_PRED)
+
+	for j := 0; j < 4; j++ {
+		l := leftModes[j]
+		for i := 0; i < 4; i++ {
+			mode := modes[j][i]
+			writeI4Mode(e, mode, aboveModes[i], l)
+			l = mode
+			aboveModes[i] = mode
+		}
+		leftModes[j] = l
+	}
+
+	writeUVMode(e, predC8)
+}
+
+// writeI4Mode emits the tree-coded I4 mode given the modes of the
+// sub-blocks above and to the left. Tree structure from RFC 6386 section
+// 11.5, mirroring parsePredModeY4 in x/image/vp8/pred.go.
+func writeI4Mode(e *BoolEncoder, mode, above, left int) {
+	prob := &PredProb[above][left]
+	switch mode {
+	case ModeI4DC:
+		e.WriteBit(0, int(prob[0]))
+	case ModeI4TM:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(0, int(prob[1]))
+	case ModeI4VE:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(0, int(prob[2]))
+	case ModeI4HE:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(1, int(prob[2]))
+		e.WriteBit(0, int(prob[3]))
+		e.WriteBit(0, int(prob[4]))
+	case ModeI4RD:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(1, int(prob[2]))
+		e.WriteBit(0, int(prob[3]))
+		e.WriteBit(1, int(prob[4]))
+		e.WriteBit(0, int(prob[5]))
+	case ModeI4VR:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(1, int(prob[2]))
+		e.WriteBit(0, int(prob[3]))
+		e.WriteBit(1, int(prob[4]))
+		e.WriteBit(1, int(prob[5]))
+	case ModeI4LD:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(1, int(prob[2]))
+		e.WriteBit(1, int(prob[3]))
+		e.WriteBit(0, int(prob[6]))
+	case ModeI4VL:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(1, int(prob[2]))
+		e.WriteBit(1, int(prob[3]))
+		e.WriteBit(1, int(prob[6]))
+		e.WriteBit(0, int(prob[7]))
+	case ModeI4HD:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(1, int(prob[2]))
+		e.WriteBit(1, int(prob[3]))
+		e.WriteBit(1, int(prob[6]))
+		e.WriteBit(1, int(prob[7]))
+		e.WriteBit(0, int(prob[8]))
+	case ModeI4HU:
+		e.WriteBit(1, int(prob[0]))
+		e.WriteBit(1, int(prob[1]))
+		e.WriteBit(1, int(prob[2]))
+		e.WriteBit(1, int(prob[3]))
+		e.WriteBit(1, int(prob[6]))
+		e.WriteBit(1, int(prob[7]))
+		e.WriteBit(1, int(prob[8]))
+	}
+}
+
+func writeUVMode(e *BoolEncoder, predC8 int) {
 	switch predC8 {
 	case ModeDC:
 		e.WriteBit(0, 142)

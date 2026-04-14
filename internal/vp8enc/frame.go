@@ -67,9 +67,38 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 	// No skip probability (every MB emits residuals, even if zero).
 	WriteSkipProb(p0, false, 0)
 
-	for i, mb := range enc.mbs {
-		_ = i
-		WriteMBModes(p0, mb.yMode, mb.uvMode)
+	// Partition-0 mode coding context. leftPredMode[j] is the last (right)
+	// column of per-sub-block I4 modes in the MB immediately to the left
+	// of the current MB (reset at the start of each MB row).
+	// upPredMode[mbx*4+i] is the bottom-row of I4 modes for the MB at
+	// column mbx, position i. Used as "above" context for subsequent MBs.
+	upPredMode := make([]int, enc.frame.MBWidth*4)
+	for mby := 0; mby < enc.frame.MBHeight; mby++ {
+		leftPredMode := [4]int{ModeI4DC, ModeI4DC, ModeI4DC, ModeI4DC}
+		for mbx := 0; mbx < enc.frame.MBWidth; mbx++ {
+			mb := enc.mbs[mby*enc.frame.MBWidth+mbx]
+			if mb.isI16 {
+				WriteMBModes(p0, mb.yMode, mb.uvMode)
+				// I16 MBs propagate their Y mode as the context for all
+				// 4 edge positions for neighbor MBs.
+				fill := i16ToI4Context(mb.yMode)
+				for i := 0; i < 4; i++ {
+					upPredMode[mbx*4+i] = fill
+					leftPredMode[i] = fill
+				}
+			} else {
+				var above [4]int
+				for i := 0; i < 4; i++ {
+					above[i] = upPredMode[mbx*4+i]
+				}
+				left := leftPredMode
+				WriteMBModesBPred(p0, &mb.i4Modes, &above, &left, mb.uvMode)
+				for i := 0; i < 4; i++ {
+					upPredMode[mbx*4+i] = above[i]
+				}
+				leftPredMode = left
+			}
+		}
 	}
 
 	p0Bytes := p0.Finish()
@@ -149,7 +178,10 @@ func EncodeWebP(w io.Writer, img image.Image, opts EncodeOptions) error {
 // the MB walk (to keep reconstruction local) but the mode bits live in
 // partition 0 and must be emitted at the end.
 type mbDecision struct {
-	yMode, uvMode int
+	isI16   bool
+	yMode   int     // I16 mode when isI16; ignored when B_PRED
+	i4Modes [4][4]int // I4 modes per sub-block when !isI16
+	uvMode  int
 }
 
 // encState orchestrates frame encoding. It maintains source and
@@ -311,13 +343,16 @@ func (s *encState) getUVTopLeft(plane byte, mbx, mby int) byte {
 // --- Per-MB encode ----------------------------------------------------
 
 func (s *encState) encodeOneMB(mbx, mby int) {
-	// 1. Pick Y mode by SSE.
-	yMode := s.pickYMode(mbx, mby)
-
-	// 2. Pick UV mode by SSE.
+	// Pick UV mode (same for both I16 and B_PRED paths).
 	uvMode := s.pickUVMode(mbx, mby)
 
-	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{yMode: yMode, uvMode: uvMode}
+	if s.opts.Method >= 2 {
+		s.encodeBPredMB(mbx, mby, uvMode)
+		return
+	}
+
+	yMode := s.pickYMode(mbx, mby)
+	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{isI16: true, yMode: yMode, uvMode: uvMode}
 
 	// 3. Build the Y predictor and residuals.
 	var yTop, yLeft [16]byte
@@ -542,6 +577,327 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 	}
 }
 
+// encodeBPredMB encodes a macroblock using the 16 independent 4x4 I4
+// predictors. Sub-blocks are processed in raster order; each sub-block's
+// prediction reads from the reconstruction of already-processed
+// sub-blocks (within this MB) or from the reconY plane (outside this MB).
+func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
+	// Build the MB's top row + 4-pixel overhang (20 pixels total) and
+	// the 16-pixel left column. These are the pixels visible at the
+	// "edges" of the MB; within-MB sub-block prediction uses inMB.
+	var topRow [20]byte
+	var leftCol [16]byte
+	var corner byte = s.getYTopLeft(mbx, mby)
+
+	if mby == 0 {
+		for i := 0; i < 20; i++ {
+			topRow[i] = 0x7f
+		}
+	} else {
+		ybase := (mby*16 - 1) * s.frame.YStride
+		for i := 0; i < 16; i++ {
+			topRow[i] = s.reconY[ybase+mbx*16+i]
+		}
+		// Overhang (pixels 16..19) comes from the MB above-right if that
+		// MB exists, else replicated from the last top pixel.
+		if mbx == s.frame.MBWidth-1 {
+			r := s.reconY[ybase+mbx*16+15]
+			for i := 16; i < 20; i++ {
+				topRow[i] = r
+			}
+		} else {
+			for i := 0; i < 4; i++ {
+				topRow[16+i] = s.reconY[ybase+mbx*16+16+i]
+			}
+		}
+	}
+
+	if mbx == 0 {
+		for j := 0; j < 16; j++ {
+			leftCol[j] = 0x81
+		}
+	} else {
+		for j := 0; j < 16; j++ {
+			leftCol[j] = s.reconY[(mby*16+j)*s.frame.YStride+mbx*16-1]
+		}
+	}
+
+	// Reconstructed MB pixels (built up as we process sub-blocks).
+	var inMB [16][16]byte
+
+	// Per-sub-block mode and non-zero tracking.
+	var modes [4][4]int
+	lnzY := unpackNibble(s.leftNZ & 0x0f)
+	unzY := unpackNibble(s.upNZ[mbx] & 0x0f)
+
+	for sj := 0; sj < 4; sj++ {
+		for si := 0; si < 4; si++ {
+			// Build sub-block neighbors.
+			var tl byte
+			var top [8]byte
+			var left [4]byte
+			s.buildI4Neighbors(&tl, &top, &left, &inMB, &topRow, &leftCol, corner, si, sj)
+
+			// Gather source pixels for this sub-block.
+			var src [16]byte
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					src[j*4+i] = s.frame.Y[(mby*16+sj*4+j)*s.frame.YStride+mbx*16+si*4+i]
+				}
+			}
+
+			// Min-SSE mode search. Skip modes that require unavailable
+			// neighbors on frame edges (let DC always be a fallback).
+			hasTop := mby > 0 || sj > 0
+			hasLeft := mbx > 0 || si > 0
+			bestMode := ModeI4DC
+			bestSSE := int64(-1)
+			var bestPred [16]byte
+			for m := 0; m < NumPredModes; m++ {
+				if !hasTop && (m == ModeI4VE || m == ModeI4RD || m == ModeI4VR ||
+					m == ModeI4LD || m == ModeI4VL) {
+					continue
+				}
+				if !hasLeft && (m == ModeI4HE || m == ModeI4RD || m == ModeI4VR ||
+					m == ModeI4HD || m == ModeI4HU) {
+					continue
+				}
+				if m == ModeI4TM && (!hasTop || !hasLeft) {
+					continue
+				}
+				var pred [16]byte
+				PredictI4(&pred, m, tl, &top, &left)
+				sse := SumSquaredError(src[:], pred[:])
+				if bestSSE < 0 || sse < bestSSE {
+					bestSSE = sse
+					bestMode = m
+					bestPred = pred
+				}
+			}
+			modes[sj][si] = bestMode
+
+			// Compute residual and run transform/quantize.
+			var res, coef, q, dq [16]int16
+			for k := 0; k < 16; k++ {
+				res[k] = int16(src[k]) - int16(bestPred[k])
+			}
+			FDCT4x4(res[:], coef[:])
+			dzAC := int32(s.quant.Y1[1]) / 4
+			QuantizeBlock(coef[:], q[:], dq[:], s.quant.Y1[0], s.quant.Y1[1], dzAC)
+
+			// Emit tokens (Y1SansY2 plane, no Y2 DC skip).
+			ctx := int(lnzY[sj]) + int(unzY[si])
+			nz := WriteCoefBlock(s.p1, &q, PlaneY1SansY2, ctx,
+				&DefaultTokenProb, false)
+
+			// Propagate nz to the sub-block's bottom (for next row) and
+			// right (for next column within this row).
+			lnzY[sj] = uint8(nz)
+			unzY[si] = uint8(nz)
+
+			// Reconstruct.
+			var resRec [16]int16
+			IDCT4x4(dq[:], resRec[:])
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					v := int32(bestPred[j*4+i]) + int32(resRec[j*4+i])
+					inMB[sj*4+j][si*4+i] = byte(clampInt32(v, 0, 255))
+				}
+			}
+		}
+	}
+
+	// Copy reconstructed Y into the recon plane.
+	for j := 0; j < 16; j++ {
+		for i := 0; i < 16; i++ {
+			s.reconY[(mby*16+j)*s.frame.YStride+mbx*16+i] = inMB[j][i]
+		}
+	}
+
+	newLeftY := packNibble(lnzY)
+	newUpY := packNibble(unzY)
+	// Update luma nz bits first (low nibble); encodeMBChroma will update
+	// the chroma bits (high nibble) on top of this.
+	s.leftNZ = (s.leftNZ & 0xf0) | newLeftY
+	s.upNZ[mbx] = (s.upNZ[mbx] & 0xf0) | newUpY
+
+	// UV: same as I16 path — predict, residual, transform, quantize,
+	// emit tokens, reconstruct.
+	s.encodeMBChroma(mbx, mby, uvMode)
+
+	// B_PRED MBs have no Y2 block; explicitly clear its nz context.
+	s.leftNZY2 = 0
+	s.upNZY2[mbx] = 0
+
+	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{
+		isI16:   false,
+		i4Modes: modes,
+		uvMode:  uvMode,
+	}
+}
+
+// buildI4Neighbors fills (tl, top, left) for the sub-block at position
+// (si, sj) within the current MB, pulling from either the in-MB
+// reconstruction buffer (for sub-blocks already processed in this MB) or
+// from the MB-edge neighbor arrays (for pixels outside this MB).
+func (s *encState) buildI4Neighbors(tl *byte, top *[8]byte, left *[4]byte,
+	inMB *[16][16]byte, topRow *[20]byte, leftCol *[16]byte, corner byte,
+	si, sj int) {
+	x0 := si * 4
+	y0 := sj * 4
+
+	// Top-left corner.
+	switch {
+	case si == 0 && sj == 0:
+		*tl = corner
+	case sj == 0:
+		*tl = topRow[x0-1]
+	case si == 0:
+		*tl = leftCol[y0-1]
+	default:
+		*tl = inMB[y0-1][x0-1]
+	}
+
+	// Direct top (4 pixels above).
+	if sj == 0 {
+		for i := 0; i < 4; i++ {
+			top[i] = topRow[x0+i]
+		}
+	} else {
+		for i := 0; i < 4; i++ {
+			top[i] = inMB[y0-1][x0+i]
+		}
+	}
+
+	// Top-right overhang (4 pixels to the top-right). For non-right-col
+	// sub-blocks in row 0, these are the next 4 top-row pixels; for
+	// row 0 right-column (si=3), they're the MB's overhang (topRow[16..19]).
+	// For sj>=1 non-right-col, they're the bottom row of the sub-block
+	// at (si+1, sj-1). For sj>=1 right-col, they're replicated from the
+	// MB-level overhang (same as sj=0 si=3) — matches decoder's prepareYBR
+	// duplication of ybr[0][24..27] to ybr[4/8/12][24..27].
+	if si == 3 {
+		for i := 0; i < 4; i++ {
+			top[4+i] = topRow[16+i]
+		}
+	} else if sj == 0 {
+		for i := 0; i < 4; i++ {
+			top[4+i] = topRow[x0+4+i]
+		}
+	} else {
+		// si < 3, sj >= 1: top-right is the bottom row of (si+1, sj-1),
+		// which has already been reconstructed.
+		for i := 0; i < 4; i++ {
+			top[4+i] = inMB[y0-1][x0+4+i]
+		}
+	}
+
+	// Left column.
+	if si == 0 {
+		for j := 0; j < 4; j++ {
+			left[j] = leftCol[y0+j]
+		}
+	} else {
+		for j := 0; j < 4; j++ {
+			left[j] = inMB[y0+j][x0-1]
+		}
+	}
+}
+
+// encodeMBChroma handles the 8x8 UV prediction, residual, transform,
+// quantize, token emission, and reconstruction for one MB. Shared by
+// both I16 and B_PRED luma paths.
+func (s *encState) encodeMBChroma(mbx, mby int, uvMode int) {
+	var cbTop, cbLeft [8]byte
+	cbHasTop := s.getUVTopRow('U', mbx, mby, &cbTop)
+	cbHasLeft := s.getUVLeftCol('U', mbx, mby, &cbLeft)
+	cbTL := s.getUVTopLeft('U', mbx, mby)
+	var cbPred [64]byte
+	PredictUV8(&cbPred, uvMode, &cbTop, &cbLeft, cbTL, cbHasTop, cbHasLeft)
+
+	var crTop, crLeft [8]byte
+	crHasTop := s.getUVTopRow('V', mbx, mby, &crTop)
+	crHasLeft := s.getUVLeftCol('V', mbx, mby, &crLeft)
+	crTL := s.getUVTopLeft('V', mbx, mby)
+	var crPred [64]byte
+	PredictUV8(&crPred, uvMode, &crTop, &crLeft, crTL, crHasTop, crHasLeft)
+
+	var cbRes, cbCoef, cbQ, cbDQ [4][16]int16
+	var crRes, crCoef, crQ, crDQ [4][16]int16
+	for sby := 0; sby < 2; sby++ {
+		for sbx := 0; sbx < 2; sbx++ {
+			subIdx := sby*2 + sbx
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					px := mbx*8 + sbx*4 + i
+					py := mby*8 + sby*4 + j
+					cbRes[subIdx][j*4+i] = int16(s.frame.Cb[py*s.frame.UVStride+px]) -
+						int16(cbPred[(sby*4+j)*8+sbx*4+i])
+					crRes[subIdx][j*4+i] = int16(s.frame.Cr[py*s.frame.UVStride+px]) -
+						int16(crPred[(sby*4+j)*8+sbx*4+i])
+				}
+			}
+			FDCT4x4(cbRes[subIdx][:], cbCoef[subIdx][:])
+			FDCT4x4(crRes[subIdx][:], crCoef[subIdx][:])
+			dzUV := int32(s.quant.UV[1]) / 4
+			QuantizeBlock(cbCoef[subIdx][:], cbQ[subIdx][:], cbDQ[subIdx][:],
+				s.quant.UV[0], s.quant.UV[1], dzUV)
+			QuantizeBlock(crCoef[subIdx][:], crQ[subIdx][:], crDQ[subIdx][:],
+				s.quant.UV[0], s.quant.UV[1], dzUV)
+		}
+	}
+
+	// Emit chroma tokens.
+	lnzUV := unpackNibble(s.leftNZ >> 4)
+	unzUV := unpackNibble(s.upNZ[mbx] >> 4)
+	for sby := 0; sby < 2; sby++ {
+		nzLeft := lnzUV[sby]
+		for sbx := 0; sbx < 2; sbx++ {
+			ctx := int(nzLeft + unzUV[sbx])
+			nz := WriteCoefBlock(s.p1, &cbQ[sby*2+sbx], PlaneUV, ctx,
+				&DefaultTokenProb, false)
+			nzLeft = uint8(nz)
+			unzUV[sbx] = uint8(nz)
+		}
+		lnzUV[sby] = nzLeft
+	}
+	for sby := 0; sby < 2; sby++ {
+		nzLeft := lnzUV[sby+2]
+		for sbx := 0; sbx < 2; sbx++ {
+			ctx := int(nzLeft + unzUV[sbx+2])
+			nz := WriteCoefBlock(s.p1, &crQ[sby*2+sbx], PlaneUV, ctx,
+				&DefaultTokenProb, false)
+			nzLeft = uint8(nz)
+			unzUV[sbx+2] = uint8(nz)
+		}
+		lnzUV[sby+2] = nzLeft
+	}
+	newLeftUV := packNibble(lnzUV)
+	newUpUV := packNibble(unzUV)
+	s.leftNZ = (s.leftNZ & 0x0f) | (newLeftUV << 4)
+	s.upNZ[mbx] = (s.upNZ[mbx] & 0x0f) | (newUpUV << 4)
+
+	// Reconstruct chroma.
+	for sby := 0; sby < 2; sby++ {
+		for sbx := 0; sbx < 2; sbx++ {
+			subIdx := sby*2 + sbx
+			var cbResRec, crResRec [16]int16
+			IDCT4x4(cbDQ[subIdx][:], cbResRec[:])
+			IDCT4x4(crDQ[subIdx][:], crResRec[:])
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					px := mbx*8 + sbx*4 + i
+					py := mby*8 + sby*4 + j
+					cbV := int32(cbPred[(sby*4+j)*8+sbx*4+i]) + int32(cbResRec[j*4+i])
+					crV := int32(crPred[(sby*4+j)*8+sbx*4+i]) + int32(crResRec[j*4+i])
+					s.reconCb[py*s.frame.UVStride+px] = byte(clampInt32(cbV, 0, 255))
+					s.reconCr[py*s.frame.UVStride+px] = byte(clampInt32(crV, 0, 255))
+				}
+			}
+		}
+	}
+}
+
 // pickYMode returns the I16 mode (DC/VE/HE/TM) with lowest SSE against the
 // source luma block. Method=0 shortcuts to DC.
 func (s *encState) pickYMode(mbx, mby int) int {
@@ -643,6 +999,22 @@ func unpackNibble(mask uint8) [4]uint8 {
 // packNibble packs 4 0/1 values back into a single nibble, LSB first.
 func packNibble(v [4]uint8) uint8 {
 	return v[0] | (v[1] << 1) | (v[2] << 2) | (v[3] << 3)
+}
+
+// i16ToI4Context maps an I16 mode to the equivalent I4 mode used for
+// propagating prediction context to neighbor MBs. DC↔DC, V↔V, H↔H, TM↔TM.
+func i16ToI4Context(i16 int) int {
+	switch i16 {
+	case ModeDC:
+		return ModeI4DC
+	case ModeVE:
+		return ModeI4VE
+	case ModeHE:
+		return ModeI4HE
+	case ModeTM:
+		return ModeI4TM
+	}
+	return ModeI4DC
 }
 
 // qualityToQI maps a 0..100 quality setting to a 0..127 base quantizer
