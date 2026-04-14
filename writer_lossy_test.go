@@ -167,6 +167,85 @@ func decodeVP8Frame(payload []byte, wantW, wantH int) error {
     return err
 }
 
+// TestEncodeLossyRGBA verifies that a lossy-encoded image with a
+// non-trivial alpha channel roundtrips through xwebp.Decode with alpha
+// preserved (within quantization error on the color channels only —
+// alpha is raw uncompressed, so it roundtrips exactly).
+func TestEncodeLossyRGBA(t *testing.T) {
+    w, h := 32, 32
+    src := image.NewNRGBA(image.Rect(0, 0, w, h))
+    for y := 0; y < h; y++ {
+        for x := 0; x < w; x++ {
+            // Alpha gradient horizontally.
+            src.SetNRGBA(x, y, color.NRGBA{200, 100, 50, uint8((x * 255) / w)})
+        }
+    }
+    var buf bytes.Buffer
+    if err := Encode(&buf, src, &Options{Lossy: true, Quality: 90}); err != nil {
+        t.Fatalf("Encode: %v", err)
+    }
+    // Must contain VP8X + ALPH + VP8 (no VP8L).
+    data := buf.Bytes()
+    if !bytes.Contains(data, []byte("VP8X")) {
+        t.Errorf("missing VP8X")
+    }
+    if !bytes.Contains(data, []byte("ALPH")) {
+        t.Errorf("missing ALPH chunk for alpha data")
+    }
+    if !bytes.Contains(data, []byte("VP8 ")) {
+        t.Errorf("missing VP8 chunk for lossy color data")
+    }
+    // Roundtrip decode.
+    decoded, err := xwebp.Decode(bytes.NewReader(data))
+    if err != nil {
+        t.Fatalf("xwebp.Decode: %v", err)
+    }
+    if decoded.Bounds().Dx() != w || decoded.Bounds().Dy() != h {
+        t.Errorf("decoded bounds %v", decoded.Bounds())
+    }
+    // Alpha is uncompressed so it must roundtrip exactly.
+    alphaErr := 0
+    for y := 0; y < h; y++ {
+        for x := 0; x < w; x++ {
+            _, _, _, a := decoded.At(x, y).RGBA()
+            want := uint8((x * 255) / w)
+            got := uint8(a >> 8)
+            d := int(got) - int(want)
+            if d < 0 {
+                d = -d
+            }
+            if d > alphaErr {
+                alphaErr = d
+            }
+        }
+    }
+    if alphaErr > 1 {
+        t.Errorf("alpha roundtrip error up to %d; want exact", alphaErr)
+    }
+}
+
+// TestEncodeLossyOpaqueNoALPH verifies that a fully-opaque input (alpha
+// channel all 0xff) uses the simple VP8-only container without an
+// unnecessary VP8X + ALPH overhead.
+func TestEncodeLossyOpaqueNoALPH(t *testing.T) {
+    img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+    for y := 0; y < 16; y++ {
+        for x := 0; x < 16; x++ {
+            img.SetNRGBA(x, y, color.NRGBA{100, 100, 100, 255})
+        }
+    }
+    var buf bytes.Buffer
+    if err := Encode(&buf, img, &Options{Lossy: true}); err != nil {
+        t.Fatalf("Encode: %v", err)
+    }
+    if bytes.Contains(buf.Bytes(), []byte("ALPH")) {
+        t.Errorf("opaque input should not produce ALPH chunk")
+    }
+    if bytes.Contains(buf.Bytes(), []byte("VP8X")) {
+        t.Errorf("opaque input should not need VP8X container")
+    }
+}
+
 // TestEncodeLosslessUnchanged guards against the lossy dispatch breaking
 // the existing VP8L path: default options (nil or Lossy=false) must still
 // produce VP8L output.

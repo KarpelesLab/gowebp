@@ -108,20 +108,71 @@ func Encode(w io.Writer, img image.Image, o *Options) error {
     return nil
 }
 
-// encodeLossy produces a VP8-coded .webp file. It wraps the VP8 frame in
-// the standard RIFF/WEBP/VP8 chunk structure. The current implementation
-// is the Phase B scaffolding: valid bitstream that decodes correctly but
-// does not yet perform mode selection or residual coding; those land in
-// subsequent phases.
+// encodeLossy produces a VP8-coded .webp file. When the source image has
+// alpha, the VP8 (opaque color) chunk is paired with an ALPH chunk
+// carrying the alpha plane inside a VP8X container (spec section 2 /
+// WebP container spec "Alpha").
 func encodeLossy(w io.Writer, img image.Image, o *Options) error {
     q := o.Quality
     if q == 0 {
         q = 75
     }
-    return vp8enc.EncodeWebP(w, img, vp8enc.EncodeOptions{
+
+    alpha := vp8enc.ExtractAlpha(img)
+    if alpha == nil {
+        // Fully opaque (or no alpha channel): simple VP8 container.
+        return vp8enc.EncodeWebP(w, img, vp8enc.EncodeOptions{
+            Quality: q,
+            Method:  o.Method,
+        })
+    }
+
+    // Mixed-alpha path: VP8X + VP8 + ALPH.
+    var vp8buf bytes.Buffer
+    if err := vp8enc.EncodeFrame(&vp8buf, img, vp8enc.EncodeOptions{
         Quality: q,
         Method:  o.Method,
-    })
+    }); err != nil {
+        return err
+    }
+
+    inner := &bytes.Buffer{}
+    writeChunkVP8X(inner, img.Bounds(), true, false)
+    writeChunkALPH(inner, img.Bounds(), alpha)
+    writeChunkVP8(inner, vp8buf.Bytes())
+
+    w.Write([]byte("RIFF"))
+    binary.Write(w, binary.LittleEndian, uint32(4+inner.Len()))
+    w.Write([]byte("WEBP"))
+    w.Write(inner.Bytes())
+    return nil
+}
+
+// writeChunkVP8 emits a VP8 sub-chunk with even-length padding.
+func writeChunkVP8(buf *bytes.Buffer, payload []byte) {
+    buf.Write([]byte("VP8 "))
+    binary.Write(buf, binary.LittleEndian, uint32(len(payload)))
+    buf.Write(payload)
+    if len(payload)&1 == 1 {
+        buf.WriteByte(0)
+    }
+}
+
+// writeChunkALPH emits an ALPH sub-chunk with the raw alpha plane.
+// Uses method=0 (uncompressed) and filter=0 (none); preprocessing=0.
+// The header byte layout is RRMMFFCC where CC is compression, FF is
+// filter, MM is preprocessing (RFC: WebP container spec "Alpha").
+func writeChunkALPH(buf *bytes.Buffer, bounds image.Rectangle, alpha []byte) {
+    payloadLen := 1 + len(alpha) // 1 header byte + raw alpha plane
+    buf.Write([]byte("ALPH"))
+    binary.Write(buf, binary.LittleEndian, uint32(payloadLen))
+    // Header byte: method=0 (uncompressed), filter=0 (none),
+    // preprocessing=0, reserved=0.
+    buf.WriteByte(0x00)
+    buf.Write(alpha)
+    if payloadLen&1 == 1 {
+        buf.WriteByte(0)
+    }
 }
 
 // EncodeAll writes the provided animation sequence to the specified io.Writer in WebP format.
