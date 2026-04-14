@@ -333,64 +333,62 @@ func writeFrames(ani *Animation, o *Options) (*bytes.Buffer, bool, error) {
 
     var hasAlpha bool
     for i, img := range ani.Images {
-        var payload []byte
+        var framePayload bytes.Buffer
         var alpha bool
-        var chunkFourCC []byte
 
         if lossy {
-            var framebuf bytes.Buffer
-            if err := vp8enc.EncodeFrame(&framebuf, img, vp8enc.EncodeOptions{
+            // Lossy animation frame: optional ALPH (if image has alpha)
+            // followed by a VP8 color chunk, both wrapped in the ANMF.
+            alphaPlane := vp8enc.ExtractAlpha(img)
+            if alphaPlane != nil {
+                writeChunkALPH(&framePayload, img.Bounds(), alphaPlane)
+                alpha = true
+            }
+            var vp8 bytes.Buffer
+            if err := vp8enc.EncodeFrame(&vp8, img, vp8enc.EncodeOptions{
                 Quality: quality,
                 Method:  method,
             }); err != nil {
                 return nil, false, err
             }
-            payload = framebuf.Bytes()
-            chunkFourCC = []byte("VP8 ")
-            // Lossy VP8 has no native alpha; we don't yet emit ALPH
-            // chunks for animations.
-            alpha = false
+            writeChunkVP8(&framePayload, vp8.Bytes())
         } else {
             stream, a, err := writeBitStream(img)
             if err != nil {
                 return nil, false, err
             }
-            payload = stream.Bytes()
-            chunkFourCC = []byte("VP8L")
+            // VP8L sub-chunk inside ANMF. Use the same fourcc/size/pad
+            // pattern as writeChunkVP8 for consistency.
+            framePayload.Write([]byte("VP8L"))
+            binary.Write(&framePayload, binary.LittleEndian, uint32(stream.Len()))
+            framePayload.Write(stream.Bytes())
+            if stream.Len()&1 == 1 {
+                framePayload.WriteByte(0)
+            }
             alpha = a
         }
 
         hasAlpha = hasAlpha || alpha
 
-        // VP8/VP8L chunks inside ANMF must be even-length; pad with a
-        // zero byte when the payload length is odd.
-        paddedLen := len(payload)
-        if paddedLen&1 == 1 {
-            paddedLen++
-        }
-
         w := &bitWriter{Buffer: buf}
         w.writeBytes([]byte("ANMF"))
-        w.writeBits(uint64(16 + 8 + paddedLen), 32)
+        // ANMF payload = 16-byte frame header + framePayload (which
+        // already contains its own sub-chunk headers + padding).
+        w.writeBits(uint64(16+framePayload.Len()), 32)
 
         // WebP specs requires frame offsets to be divided by 2
-        w.writeBits(uint64(img.Bounds().Min.X / 2), 24)
-        w.writeBits(uint64(img.Bounds().Min.Y / 2), 24)
-    
-        w.writeBits(uint64(img.Bounds().Dx() - 1), 24)
-        w.writeBits(uint64(img.Bounds().Dy() - 1), 24)
-    
+        w.writeBits(uint64(img.Bounds().Min.X/2), 24)
+        w.writeBits(uint64(img.Bounds().Min.Y/2), 24)
+
+        w.writeBits(uint64(img.Bounds().Dx()-1), 24)
+        w.writeBits(uint64(img.Bounds().Dy()-1), 24)
+
         w.writeBits(uint64(ani.Durations[i]), 24)
         w.writeBits(uint64(ani.Disposals[i]), 1)
         w.writeBits(uint64(0), 1)
         w.writeBits(uint64(0), 6)
-    
-        w.writeBytes(chunkFourCC)
-        w.writeBits(uint64(len(payload)), 32)
-        w.Buffer.Write(payload)
-        if paddedLen != len(payload) {
-            w.Buffer.WriteByte(0)
-        }
+
+        w.Buffer.Write(framePayload.Bytes())
     }
 
     return buf, hasAlpha, nil

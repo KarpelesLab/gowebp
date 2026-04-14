@@ -306,11 +306,8 @@ func TestEncodeLossyOpaqueNoALPH(t *testing.T) {
 }
 
 // TestEncodeAllLossyRGBA verifies that lossy animations with non-opaque
-// frames produce valid output. Each ANMF currently contains only a VP8
-// chunk (no ALPH in animations — that's deferred); the animation-wide
-// VP8X container records alpha presence via the alpha flag. This test
-// therefore checks the structure rather than round-tripping alpha
-// pixel-for-pixel.
+// frames include ALPH chunks inside each ANMF wrapper for alpha
+// preservation.
 func TestEncodeAllLossyRGBA(t *testing.T) {
     w, h := 16, 16
     makeFrame := func(alphaBase uint8) image.Image {
@@ -337,16 +334,15 @@ func TestEncodeAllLossyRGBA(t *testing.T) {
         t.Fatalf("EncodeAll: %v", err)
     }
     data := buf.Bytes()
-    // Structural checks only — x/image/webp doesn't decode animations.
     for _, want := range [][]byte{
-        []byte("RIFF"), []byte("WEBP"), []byte("VP8X"), []byte("ANIM"), []byte("ANMF"), []byte("VP8 "),
+        []byte("RIFF"), []byte("WEBP"), []byte("VP8X"),
+        []byte("ANIM"), []byte("ANMF"),
+        []byte("ALPH"), []byte("VP8 "),
     } {
         if !bytes.Contains(data, want) {
             t.Errorf("missing chunk %q", want)
         }
     }
-    // Pure VP8-color (no ALPH inside ANMF) is the current behavior;
-    // once ALPH-in-ANMF lands, this assertion relaxes.
 }
 
 // TestEncodeLossyDefaultOptions verifies that the simplest possible
