@@ -9,9 +9,11 @@ import (
 	xwebp "golang.org/x/image/webp"
 )
 
-// TestBPredSolidColor checks that B_PRED on a solid color image
-// produces output comparable to I16 — neither should have trouble with
-// a constant input.
+// TestBPredSolidColor verifies that both I16 and B_PRED paths
+// produce near-perfect roundtrip on a solid-color input — defaults
+// for top/left neighbors at frame edges give constant predictions,
+// so the residual is zero and reconstruction exactly matches
+// (modulo the YUV-colorspace discretization).
 func TestBPredSolidColor(t *testing.T) {
 	w, h := 16, 16
 	src := image.NewNRGBA(image.Rect(0, 0, w, h))
@@ -21,25 +23,28 @@ func TestBPredSolidColor(t *testing.T) {
 		}
 	}
 
-	var bufI16, bufBPred bytes.Buffer
-	EncodeWebP(&bufI16, src, EncodeOptions{Quality: 90, Method: 1})
-	EncodeWebP(&bufBPred, src, EncodeOptions{Quality: 90, Method: 2})
-
-	decI16, err := xwebp.Decode(bytes.NewReader(bufI16.Bytes()))
-	if err != nil {
-		t.Fatalf("decode I16: %v", err)
+	for _, method := range []int{1, 2, 3} {
+		var buf bytes.Buffer
+		if err := EncodeWebP(&buf, src, EncodeOptions{Quality: 90, Method: method}); err != nil {
+			t.Fatalf("M=%d: %v", method, err)
+		}
+		dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("M=%d: decode %v", method, err)
+		}
+		ycbcr := dec.(*image.YCbCr)
+		// Solid gray 128 → limited-range Y ≈ 126.
+		// Every pixel must be within ±2 of 126 for the roundtrip to be
+		// considered near-perfect.
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				v := ycbcr.Y[y*ycbcr.YStride+x]
+				if v < 124 || v > 128 {
+					t.Errorf("M=%d pixel(%d,%d)=%d, want ~126", method, x, y, v)
+					break
+				}
+			}
+		}
+		t.Logf("M=%d: %d bytes", method, buf.Len())
 	}
-	decBPred, err := xwebp.Decode(bytes.NewReader(bufBPred.Bytes()))
-	if err != nil {
-		t.Fatalf("decode B_PRED: %v", err)
-	}
-
-	psnrI16 := computePSNR(src, decI16)
-	psnrBPred := computePSNR(src, decBPred)
-	t.Logf("solid-gray 16x16 Q=90 — I16: %.2f dB (%d B), B_PRED: %.2f dB (%d B)",
-		psnrI16, bufI16.Len(), psnrBPred, bufBPred.Len())
-
-	// Sample decoded pixels for diagnostic.
-	r0, g0, b0, _ := decBPred.At(8, 8).RGBA()
-	t.Logf("B_PRED decoded center pixel: (%d, %d, %d)", r0>>8, g0>>8, b0>>8)
 }
