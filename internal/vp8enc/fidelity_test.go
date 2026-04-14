@@ -173,6 +173,39 @@ func TestBPredBeatsI16OnTexture(t *testing.T) {
 	}
 }
 
+// TestSkipSavesBytesOnFlat checks that MBs with all-zero quantized
+// coefficients trigger the skip bit and omit token emission. Flat
+// content after prediction produces near-zero residuals that quantize
+// to zero; file size should drop noticeably.
+func TestSkipSavesBytesOnFlat(t *testing.T) {
+	w, h := 128, 128
+	src := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			src.SetNRGBA(x, y, color.NRGBA{128, 128, 128, 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := EncodeWebP(&buf, src, EncodeOptions{Quality: 75, Method: 1}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ycbcr := dec.(*image.YCbCr)
+	psnr := computePSNRSpec(src, ycbcr)
+	t.Logf("flat gray 128x128 Q=75 M=1: %d bytes, PSNR=%.2f dB", buf.Len(), psnr)
+	// A 128x128 flat image should compress to very few bytes with
+	// skip enabled (most MBs skip after prediction).
+	if buf.Len() > 300 {
+		t.Errorf("flat-content file size %d bytes — skip bit not effective", buf.Len())
+	}
+	if psnr < 35 {
+		t.Errorf("flat-content PSNR %.2f below expected 35+", psnr)
+	}
+}
+
 // BenchmarkEncode256x256 measures encode throughput on a 256x256
 // natural-ish image across the three main method levels.
 func BenchmarkEncode256x256(b *testing.B) {

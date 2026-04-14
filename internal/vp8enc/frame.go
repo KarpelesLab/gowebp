@@ -72,8 +72,10 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 	WriteQuantHeader(p0, baseQ)
 	WriteRefreshEntropyProbs(p0)
 	WriteTokenProbUpdates(p0)
-	// No skip probability (every MB emits residuals, even if zero).
-	WriteSkipProb(p0, false, 0)
+	// Enable per-MB skip bit. skipProb=128 is a neutral default; real
+	// rate tuning would measure the actual skip rate across MBs and
+	// calibrate. For typical content ~10-30% of MBs can skip.
+	WriteSkipProb(p0, true, 128)
 
 	// Partition-0 mode coding context. leftPredMode[j] is the last (right)
 	// column of per-sub-block I4 modes in the MB immediately to the left
@@ -85,6 +87,12 @@ func EncodeFrame(w io.Writer, img image.Image, opts EncodeOptions) error {
 		leftPredMode := [4]int{ModeI4DC, ModeI4DC, ModeI4DC, ModeI4DC}
 		for mbx := 0; mbx < enc.frame.MBWidth; mbx++ {
 			mb := enc.mbs[mby*enc.frame.MBWidth+mbx]
+			// Emit skip bit first, as the decoder expects.
+			if mb.skip {
+				p0.WriteBit(1, 128)
+			} else {
+				p0.WriteBit(0, 128)
+			}
 			if mb.isI16 {
 				WriteMBModes(p0, mb.yMode, mb.uvMode)
 				// I16 MBs propagate their Y mode as the context for all
@@ -187,7 +195,8 @@ func EncodeWebP(w io.Writer, img image.Image, opts EncodeOptions) error {
 // partition 0 and must be emitted at the end.
 type mbDecision struct {
 	isI16   bool
-	yMode   int     // I16 mode when isI16; ignored when B_PRED
+	skip    bool      // true if all quantized coefs are zero — token emission skipped
+	yMode   int       // I16 mode when isI16; ignored when B_PRED
 	i4Modes [4][4]int // I4 modes per sub-block when !isI16
 	uvMode  int
 }
@@ -387,8 +396,6 @@ func (s *encState) encodeOneMB(mbx, mby int) {
 // Extracted from the original encodeOneMB body to support per-MB
 // arbitration (the caller has already chosen yMode and uvMode).
 func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
-	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{isI16: true, yMode: yMode, uvMode: uvMode}
-
 	// 3. Build the Y predictor and residuals.
 	var yTop, yLeft [16]byte
 	hasTop := s.getYTopRow(mbx, mby, &yTop)
@@ -446,31 +453,7 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 			s.quant.Y1[0], s.quant.Y1[1], dzAC)
 	}
 
-	// 9. Emit Y2 tokens to partition 1.
-	ctxY2 := int(s.leftNZY2 + s.upNZY2[mbx])
-	y2NZ := WriteCoefBlock(s.p1, &y2Q, PlaneY2, ctxY2, &DefaultTokenProb, false)
-	s.leftNZY2 = uint8(y2NZ)
-	s.upNZY2[mbx] = uint8(y2NZ)
-
-	// 10. Emit 16 Y1 blocks (plane = Y1WithY2, skipFirstCoeff=true).
-	lnzY := unpackNibble(s.leftNZ & 0x0f)
-	unzY := unpackNibble(s.upNZ[mbx] & 0x0f)
-	for sby := 0; sby < 4; sby++ {
-		nzLeft := lnzY[sby]
-		for sbx := 0; sbx < 4; sbx++ {
-			ctx := int(nzLeft + unzY[sbx])
-			idx := sby*4 + sbx
-			nz := WriteCoefBlock(s.p1, &y1Q[idx], PlaneY1WithY2, ctx,
-				&DefaultTokenProb, true)
-			nzLeft = uint8(nz)
-			unzY[sbx] = uint8(nz)
-		}
-		lnzY[sby] = nzLeft
-	}
-	newLeftY := packNibble(lnzY)
-	newUpY := packNibble(unzY)
-
-	// 11. Chroma: Cb then Cr (4 blocks each).
+	// 9. Chroma: Cb then Cr (4 blocks each).
 	var cbTop, cbLeft [8]byte
 	cbHasTop := s.getUVTopRow('U', mbx, mby, &cbTop)
 	cbHasLeft := s.getUVLeftCol('U', mbx, mby, &cbLeft)
@@ -485,27 +468,8 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 	var crPred [64]byte
 	PredictUV8(&crPred, uvMode, &crTop, &crLeft, crTL, crHasTop, crHasLeft)
 
-	// Cb residuals + transform + quantize + emit.
+	// Chroma residuals + transform + quantize.
 	var cbRes, cbCoef, cbQ, cbDQ [4][16]int16
-	for sby := 0; sby < 2; sby++ {
-		for sbx := 0; sbx < 2; sbx++ {
-			subIdx := sby*2 + sbx
-			for j := 0; j < 4; j++ {
-				for i := 0; i < 4; i++ {
-					px := mbx*8 + sbx*4 + i
-					py := mby*8 + sby*4 + j
-					pred := int16(cbPred[(sby*4+j)*8+sbx*4+i])
-					src := int16(s.frame.Cb[py*s.frame.UVStride+px])
-					cbRes[subIdx][j*4+i] = src - pred
-				}
-			}
-			FDCT4x4(cbRes[subIdx][:], cbCoef[subIdx][:])
-			dzUV := int32(0)
-			QuantizeBlock(cbCoef[subIdx][:], cbQ[subIdx][:], cbDQ[subIdx][:],
-				s.quant.UV[0], s.quant.UV[1], dzUV)
-		}
-	}
-
 	var crRes, crCoef, crQ, crDQ [4][16]int16
 	for sby := 0; sby < 2; sby++ {
 		for sbx := 0; sbx < 2; sbx++ {
@@ -514,54 +478,95 @@ func (s *encState) encodeI16MB(mbx, mby int, yMode, uvMode int) {
 				for i := 0; i < 4; i++ {
 					px := mbx*8 + sbx*4 + i
 					py := mby*8 + sby*4 + j
-					pred := int16(crPred[(sby*4+j)*8+sbx*4+i])
-					src := int16(s.frame.Cr[py*s.frame.UVStride+px])
-					crRes[subIdx][j*4+i] = src - pred
+					cbRes[subIdx][j*4+i] = int16(s.frame.Cb[py*s.frame.UVStride+px]) -
+						int16(cbPred[(sby*4+j)*8+sbx*4+i])
+					crRes[subIdx][j*4+i] = int16(s.frame.Cr[py*s.frame.UVStride+px]) -
+						int16(crPred[(sby*4+j)*8+sbx*4+i])
 				}
 			}
+			FDCT4x4(cbRes[subIdx][:], cbCoef[subIdx][:])
 			FDCT4x4(crRes[subIdx][:], crCoef[subIdx][:])
 			dzUV := int32(0)
+			QuantizeBlock(cbCoef[subIdx][:], cbQ[subIdx][:], cbDQ[subIdx][:],
+				s.quant.UV[0], s.quant.UV[1], dzUV)
 			QuantizeBlock(crCoef[subIdx][:], crQ[subIdx][:], crDQ[subIdx][:],
 				s.quant.UV[0], s.quant.UV[1], dzUV)
 		}
 	}
 
-	// Emit Cb tokens, then Cr tokens.
-	// The decoder's chroma nz masks are in bits 4..7 of nzMask (Cb=4-5, Cr=6-7 in 2x2 layout).
-	lnzUV := unpackNibble(s.leftNZ >> 4)
-	unzUV := unpackNibble(s.upNZ[mbx] >> 4)
+	// 10. Decide skip: if every quantized coefficient is zero across
+	// Y2, all 16 Y1, all 4 Cb, all 4 Cr blocks, we can emit skip=1 and
+	// omit all residual tokens.
+	skip := allZero16(&y2Q) && blocksAllZero16(&y1Q) &&
+		blocksAllZero4(&cbQ) && blocksAllZero4(&crQ)
 
-	// Cb: 2x2 blocks at positions (y,x)=(0,0),(0,1),(1,0),(1,1).
-	// nz mask layout in the mbNzMask: Cb at bits 4-5 (and corresponding rows),
-	// Cr at bits 6-7. Follow parseResiduals layout.
-	for sby := 0; sby < 2; sby++ {
-		nzLeft := lnzUV[sby]
-		for sbx := 0; sbx < 2; sbx++ {
-			ctx := int(nzLeft + unzUV[sbx])
-			idx := sby*2 + sbx
-			nz := WriteCoefBlock(s.p1, &cbQ[idx], PlaneUV, ctx, &DefaultTokenProb, false)
-			nzLeft = uint8(nz)
-			unzUV[sbx] = uint8(nz)
-		}
-		lnzUV[sby] = nzLeft
+	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{
+		isI16: true, skip: skip, yMode: yMode, uvMode: uvMode,
 	}
-	// Cr uses the upper 2 bits of each 4-bit nibble.
-	for sby := 0; sby < 2; sby++ {
-		nzLeft := lnzUV[sby+2]
-		for sbx := 0; sbx < 2; sbx++ {
-			ctx := int(nzLeft + unzUV[sbx+2])
-			idx := sby*2 + sbx
-			nz := WriteCoefBlock(s.p1, &crQ[idx], PlaneUV, ctx, &DefaultTokenProb, false)
-			nzLeft = uint8(nz)
-			unzUV[sbx+2] = uint8(nz)
-		}
-		lnzUV[sby+2] = nzLeft
-	}
-	newLeftUV := packNibble(lnzUV)
-	newUpUV := packNibble(unzUV)
 
-	s.leftNZ = (newLeftUV << 4) | newLeftY
-	s.upNZ[mbx] = (newUpUV << 4) | newUpY
+	if skip {
+		// All-zero coefs: no tokens, and neighbor nz masks reset for
+		// subsequent MBs (matches decoder's else-branch in reconstruct).
+		s.leftNZY2 = 0
+		s.upNZY2[mbx] = 0
+		s.leftNZ = 0
+		s.upNZ[mbx] = 0
+	} else {
+		// Emit Y2 tokens to partition 1.
+		ctxY2 := int(s.leftNZY2 + s.upNZY2[mbx])
+		y2NZ := WriteCoefBlock(s.p1, &y2Q, PlaneY2, ctxY2, &DefaultTokenProb, false)
+		s.leftNZY2 = uint8(y2NZ)
+		s.upNZY2[mbx] = uint8(y2NZ)
+
+		// Emit 16 Y1 blocks (plane = Y1WithY2, skipFirstCoeff=true).
+		lnzY := unpackNibble(s.leftNZ & 0x0f)
+		unzY := unpackNibble(s.upNZ[mbx] & 0x0f)
+		for sby := 0; sby < 4; sby++ {
+			nzLeft := lnzY[sby]
+			for sbx := 0; sbx < 4; sbx++ {
+				ctx := int(nzLeft + unzY[sbx])
+				idx := sby*4 + sbx
+				nz := WriteCoefBlock(s.p1, &y1Q[idx], PlaneY1WithY2, ctx,
+					&DefaultTokenProb, true)
+				nzLeft = uint8(nz)
+				unzY[sbx] = uint8(nz)
+			}
+			lnzY[sby] = nzLeft
+		}
+		newLeftY := packNibble(lnzY)
+		newUpY := packNibble(unzY)
+
+		// Chroma token emission.
+		lnzUV := unpackNibble(s.leftNZ >> 4)
+		unzUV := unpackNibble(s.upNZ[mbx] >> 4)
+		for sby := 0; sby < 2; sby++ {
+			nzLeft := lnzUV[sby]
+			for sbx := 0; sbx < 2; sbx++ {
+				ctx := int(nzLeft + unzUV[sbx])
+				idx := sby*2 + sbx
+				nz := WriteCoefBlock(s.p1, &cbQ[idx], PlaneUV, ctx, &DefaultTokenProb, false)
+				nzLeft = uint8(nz)
+				unzUV[sbx] = uint8(nz)
+			}
+			lnzUV[sby] = nzLeft
+		}
+		for sby := 0; sby < 2; sby++ {
+			nzLeft := lnzUV[sby+2]
+			for sbx := 0; sbx < 2; sbx++ {
+				ctx := int(nzLeft + unzUV[sbx+2])
+				idx := sby*2 + sbx
+				nz := WriteCoefBlock(s.p1, &crQ[idx], PlaneUV, ctx, &DefaultTokenProb, false)
+				nzLeft = uint8(nz)
+				unzUV[sbx+2] = uint8(nz)
+			}
+			lnzUV[sby+2] = nzLeft
+		}
+		newLeftUV := packNibble(lnzUV)
+		newUpUV := packNibble(unzUV)
+
+		s.leftNZ = (newLeftUV << 4) | newLeftY
+		s.upNZ[mbx] = (newUpUV << 4) | newUpY
+	}
 
 	// 12. Reconstruct Y: IWHT → add DC back to each Y1 → IDCT → + pred → clip.
 	var y2Rec [16]int16
@@ -660,10 +665,11 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 	// Reconstructed MB pixels (built up as we process sub-blocks).
 	var inMB [16][16]byte
 
-	// Per-sub-block mode and non-zero tracking.
+	// Per-sub-block mode and non-zero tracking. Token emission is
+	// deferred until after the UV pass so we can decide skip over the
+	// entire MB's quantized coefficient set.
 	var modes [4][4]int
-	lnzY := unpackNibble(s.leftNZ & 0x0f)
-	unzY := unpackNibble(s.upNZ[mbx] & 0x0f)
+	var yQ [16][16]int16
 
 	for sj := 0; sj < 4; sj++ {
 		for si := 0; si < 4; si++ {
@@ -712,25 +718,15 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 			modes[sj][si] = bestMode
 
 			// Compute residual and run transform/quantize.
-			var res, coef, q, dq [16]int16
+			var res, coef, dq [16]int16
 			for k := 0; k < 16; k++ {
 				res[k] = int16(src[k]) - int16(bestPred[k])
 			}
 			FDCT4x4(res[:], coef[:])
 			dzAC := int32(0)
-			QuantizeBlock(coef[:], q[:], dq[:], s.quant.Y1[0], s.quant.Y1[1], dzAC)
+			QuantizeBlock(coef[:], yQ[sj*4+si][:], dq[:], s.quant.Y1[0], s.quant.Y1[1], dzAC)
 
-			// Emit tokens (Y1SansY2 plane, no Y2 DC skip).
-			ctx := int(lnzY[sj]) + int(unzY[si])
-			nz := WriteCoefBlock(s.p1, &q, PlaneY1SansY2, ctx,
-				&DefaultTokenProb, false)
-
-			// Propagate nz to the sub-block's bottom (for next row) and
-			// right (for next column within this row).
-			lnzY[sj] = uint8(nz)
-			unzY[si] = uint8(nz)
-
-			// Reconstruct.
+			// Reconstruct (needed for subsequent sub-blocks' prediction).
 			var resRec [16]int16
 			IDCT4x4(dq[:], resRec[:])
 			for j := 0; j < 4; j++ {
@@ -749,26 +745,45 @@ func (s *encState) encodeBPredMB(mbx, mby int, uvMode int) {
 		}
 	}
 
-	newLeftY := packNibble(lnzY)
-	newUpY := packNibble(unzY)
-	// Update luma nz bits first (low nibble); encodeMBChroma will update
-	// the chroma bits (high nibble) on top of this.
-	s.leftNZ = (s.leftNZ & 0xf0) | newLeftY
-	s.upNZ[mbx] = (s.upNZ[mbx] & 0xf0) | newUpY
+	// UV: predict + transform + quantize, still deferred emission.
+	cbQ, crQ := s.quantizeMBChroma(mbx, mby, uvMode)
 
-	// UV: same as I16 path — predict, residual, transform, quantize,
-	// emit tokens, reconstruct.
-	s.encodeMBChroma(mbx, mby, uvMode)
+	// Decide skip over the full MB.
+	skip := blocksAllZero16(&yQ) && blocksAllZero4(cbQ) && blocksAllZero4(crQ)
 
-	// B_PRED MBs have no Y2 block; explicitly clear its nz context.
+	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{
+		isI16: false, skip: skip, i4Modes: modes, uvMode: uvMode,
+	}
+
+	// B_PRED MBs have no Y2 block; Y2 nz is always cleared for B_PRED.
 	s.leftNZY2 = 0
 	s.upNZY2[mbx] = 0
 
-	s.mbs[mby*s.frame.MBWidth+mbx] = mbDecision{
-		isI16:   false,
-		i4Modes: modes,
-		uvMode:  uvMode,
+	if skip {
+		s.leftNZ = 0
+		s.upNZ[mbx] = 0
+		return
 	}
+
+	// Emit Y1SansY2 tokens for all 16 sub-blocks in raster order.
+	lnzY := unpackNibble(s.leftNZ & 0x0f)
+	unzY := unpackNibble(s.upNZ[mbx] & 0x0f)
+	for sj := 0; sj < 4; sj++ {
+		for si := 0; si < 4; si++ {
+			ctx := int(lnzY[sj]) + int(unzY[si])
+			nz := WriteCoefBlock(s.p1, &yQ[sj*4+si], PlaneY1SansY2, ctx,
+				&DefaultTokenProb, false)
+			lnzY[sj] = uint8(nz)
+			unzY[si] = uint8(nz)
+		}
+	}
+	newLeftY := packNibble(lnzY)
+	newUpY := packNibble(unzY)
+	s.leftNZ = (s.leftNZ & 0xf0) | newLeftY
+	s.upNZ[mbx] = (s.upNZ[mbx] & 0xf0) | newUpY
+
+	// UV token emission from the already-quantized blocks.
+	s.emitMBChromaTokens(mbx, cbQ, crQ)
 }
 
 // buildI4Neighbors fills (tl, top, left) for the sub-block at position
@@ -839,10 +854,11 @@ func (s *encState) buildI4Neighbors(tl *byte, top *[8]byte, left *[4]byte,
 	}
 }
 
-// encodeMBChroma handles the 8x8 UV prediction, residual, transform,
-// quantize, token emission, and reconstruction for one MB. Shared by
-// both I16 and B_PRED luma paths.
-func (s *encState) encodeMBChroma(mbx, mby int, uvMode int) {
+// quantizeMBChroma handles chroma prediction, residual, transform,
+// quantization, and reconstruction for one MB — but does NOT emit
+// tokens. Returns the quantized Cb and Cr blocks so the caller can
+// decide whether to emit tokens (skip=0) or suppress them (skip=1).
+func (s *encState) quantizeMBChroma(mbx, mby int, uvMode int) (*[4][16]int16, *[4][16]int16) {
 	var cbTop, cbLeft [8]byte
 	cbHasTop := s.getUVTopRow('U', mbx, mby, &cbTop)
 	cbHasLeft := s.getUVLeftCol('U', mbx, mby, &cbLeft)
@@ -857,32 +873,59 @@ func (s *encState) encodeMBChroma(mbx, mby int, uvMode int) {
 	var crPred [64]byte
 	PredictUV8(&crPred, uvMode, &crTop, &crLeft, crTL, crHasTop, crHasLeft)
 
-	var cbRes, cbCoef, cbQ, cbDQ [4][16]int16
-	var crRes, crCoef, crQ, crDQ [4][16]int16
+	cbQ := new([4][16]int16)
+	crQ := new([4][16]int16)
+	var cbDQ, crDQ [4][16]int16
 	for sby := 0; sby < 2; sby++ {
 		for sbx := 0; sbx < 2; sbx++ {
 			subIdx := sby*2 + sbx
+			var cbRes, crRes, cbCoef, crCoef [16]int16
 			for j := 0; j < 4; j++ {
 				for i := 0; i < 4; i++ {
 					px := mbx*8 + sbx*4 + i
 					py := mby*8 + sby*4 + j
-					cbRes[subIdx][j*4+i] = int16(s.frame.Cb[py*s.frame.UVStride+px]) -
+					cbRes[j*4+i] = int16(s.frame.Cb[py*s.frame.UVStride+px]) -
 						int16(cbPred[(sby*4+j)*8+sbx*4+i])
-					crRes[subIdx][j*4+i] = int16(s.frame.Cr[py*s.frame.UVStride+px]) -
+					crRes[j*4+i] = int16(s.frame.Cr[py*s.frame.UVStride+px]) -
 						int16(crPred[(sby*4+j)*8+sbx*4+i])
 				}
 			}
-			FDCT4x4(cbRes[subIdx][:], cbCoef[subIdx][:])
-			FDCT4x4(crRes[subIdx][:], crCoef[subIdx][:])
+			FDCT4x4(cbRes[:], cbCoef[:])
+			FDCT4x4(crRes[:], crCoef[:])
 			dzUV := int32(0)
-			QuantizeBlock(cbCoef[subIdx][:], cbQ[subIdx][:], cbDQ[subIdx][:],
+			QuantizeBlock(cbCoef[:], cbQ[subIdx][:], cbDQ[subIdx][:],
 				s.quant.UV[0], s.quant.UV[1], dzUV)
-			QuantizeBlock(crCoef[subIdx][:], crQ[subIdx][:], crDQ[subIdx][:],
+			QuantizeBlock(crCoef[:], crQ[subIdx][:], crDQ[subIdx][:],
 				s.quant.UV[0], s.quant.UV[1], dzUV)
 		}
 	}
 
-	// Emit chroma tokens.
+	// Reconstruct chroma immediately (doesn't depend on token emission).
+	for sby := 0; sby < 2; sby++ {
+		for sbx := 0; sbx < 2; sbx++ {
+			subIdx := sby*2 + sbx
+			var cbResRec, crResRec [16]int16
+			IDCT4x4(cbDQ[subIdx][:], cbResRec[:])
+			IDCT4x4(crDQ[subIdx][:], crResRec[:])
+			for j := 0; j < 4; j++ {
+				for i := 0; i < 4; i++ {
+					px := mbx*8 + sbx*4 + i
+					py := mby*8 + sby*4 + j
+					cbV := int32(cbPred[(sby*4+j)*8+sbx*4+i]) + int32(cbResRec[j*4+i])
+					crV := int32(crPred[(sby*4+j)*8+sbx*4+i]) + int32(crResRec[j*4+i])
+					s.reconCb[py*s.frame.UVStride+px] = byte(clampInt32(cbV, 0, 255))
+					s.reconCr[py*s.frame.UVStride+px] = byte(clampInt32(crV, 0, 255))
+				}
+			}
+		}
+	}
+	return cbQ, crQ
+}
+
+// emitMBChromaTokens writes chroma coefficient tokens to partition 1 and
+// updates the chroma non-zero mask portion of s.leftNZ and s.upNZ[mbx].
+// Paired with quantizeMBChroma when the caller decides skip=0.
+func (s *encState) emitMBChromaTokens(mbx int, cbQ, crQ *[4][16]int16) {
 	lnzUV := unpackNibble(s.leftNZ >> 4)
 	unzUV := unpackNibble(s.upNZ[mbx] >> 4)
 	for sby := 0; sby < 2; sby++ {
@@ -907,30 +950,8 @@ func (s *encState) encodeMBChroma(mbx, mby int, uvMode int) {
 		}
 		lnzUV[sby+2] = nzLeft
 	}
-	newLeftUV := packNibble(lnzUV)
-	newUpUV := packNibble(unzUV)
-	s.leftNZ = (s.leftNZ & 0x0f) | (newLeftUV << 4)
-	s.upNZ[mbx] = (s.upNZ[mbx] & 0x0f) | (newUpUV << 4)
-
-	// Reconstruct chroma.
-	for sby := 0; sby < 2; sby++ {
-		for sbx := 0; sbx < 2; sbx++ {
-			subIdx := sby*2 + sbx
-			var cbResRec, crResRec [16]int16
-			IDCT4x4(cbDQ[subIdx][:], cbResRec[:])
-			IDCT4x4(crDQ[subIdx][:], crResRec[:])
-			for j := 0; j < 4; j++ {
-				for i := 0; i < 4; i++ {
-					px := mbx*8 + sbx*4 + i
-					py := mby*8 + sby*4 + j
-					cbV := int32(cbPred[(sby*4+j)*8+sbx*4+i]) + int32(cbResRec[j*4+i])
-					crV := int32(crPred[(sby*4+j)*8+sbx*4+i]) + int32(crResRec[j*4+i])
-					s.reconCb[py*s.frame.UVStride+px] = byte(clampInt32(cbV, 0, 255))
-					s.reconCr[py*s.frame.UVStride+px] = byte(clampInt32(crV, 0, 255))
-				}
-			}
-		}
-	}
+	s.leftNZ = (s.leftNZ & 0x0f) | (packNibble(lnzUV) << 4)
+	s.upNZ[mbx] = (s.upNZ[mbx] & 0x0f) | (packNibble(unzUV) << 4)
 }
 
 // bestI16 is pickYMode that also returns the winning SSE, used by
@@ -1183,6 +1204,40 @@ func (s *encState) pickUVMode(mbx, mby int) int {
 		}
 	}
 	return best
+}
+
+// allZero16 returns true if every element of a 16-entry int16 array is zero.
+func allZero16(a *[16]int16) bool {
+	for _, v := range a {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// blocksAllZero16 checks 16 sub-blocks × 16 coefficients.
+func blocksAllZero16(a *[16][16]int16) bool {
+	for i := 0; i < 16; i++ {
+		for _, v := range a[i] {
+			if v != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// blocksAllZero4 checks 4 sub-blocks × 16 coefficients (used for Cb/Cr).
+func blocksAllZero4(a *[4][16]int16) bool {
+	for i := 0; i < 4; i++ {
+		for _, v := range a[i] {
+			if v != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // unpackNibble returns the 4 bits of mask as 0/1 uint8 values, LSB first.
