@@ -1016,7 +1016,7 @@ func (s *encState) estimateBPredSSE(mbx, mby int) int64 {
 					src[j*4+i] = s.frame.Y[(mby*16+sby*4+j)*s.frame.YStride+mbx*16+sbx*4+i]
 				}
 			}
-			tl, top, left, _, _ := s.i4NeighborsFromSource(mbx, mby, sbx, sby)
+			tl, top, left := s.i4NeighborsFromSource(mbx, mby, sbx, sby)
 
 			bestSSE := int64(-1)
 			for m := 0; m < NumPredModes; m++ {
@@ -1039,11 +1039,11 @@ func (s *encState) estimateBPredSSE(mbx, mby int) int64 {
 // (not reconstructed) — a shortcut used only for estimateBPredSSE.
 // For within-MB neighbors it reads frame.Y; for outside-MB neighbors
 // it uses reconY (which is the same as what a real encode would see).
-func (s *encState) i4NeighborsFromSource(mbx, mby, sbx, sby int) (tl byte, top [8]byte, left [4]byte, hasTop, hasLeft bool) {
+func (s *encState) i4NeighborsFromSource(mbx, mby, sbx, sby int) (tl byte, top [8]byte, left [4]byte) {
 	x0 := mbx*16 + sbx*4
 	y0 := mby*16 + sby*4
-	hasTop = y0 > 0
-	hasLeft = x0 > 0
+	hasTop := y0 > 0
+	hasLeft := x0 > 0
 
 	// top-left
 	if !hasTop && !hasLeft {
