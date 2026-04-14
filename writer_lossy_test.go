@@ -305,6 +305,37 @@ func TestEncodeLossyOpaqueNoALPH(t *testing.T) {
     }
 }
 
+// TestEncodeLossyDefaultOptions verifies that the simplest possible
+// lossy invocation — &Options{Lossy: true} with all other fields at
+// zero values — produces a reasonable file (Quality defaults to 75,
+// Method defaults to 0 but encoder still succeeds).
+func TestEncodeLossyDefaultOptions(t *testing.T) {
+    img := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+    for y := 0; y < 32; y++ {
+        for x := 0; x < 32; x++ {
+            img.SetNRGBA(x, y, color.NRGBA{
+                uint8(x * 8), uint8(y * 8), uint8((x + y) * 4), 255,
+            })
+        }
+    }
+    var buf bytes.Buffer
+    if err := Encode(&buf, img, &Options{Lossy: true}); err != nil {
+        t.Fatalf("Encode: %v", err)
+    }
+    if buf.Len() == 0 {
+        t.Fatal("empty output")
+    }
+    dec, err := xwebp.Decode(bytes.NewReader(buf.Bytes()))
+    if err != nil {
+        t.Fatalf("Decode: %v", err)
+    }
+    b := dec.Bounds()
+    if b.Dx() != 32 || b.Dy() != 32 {
+        t.Errorf("decoded size %v, want 32x32", b)
+    }
+    t.Logf("default lossy: %d bytes for 32x32", buf.Len())
+}
+
 // TestEncodeLossyOptionsValidation verifies that out-of-range Options
 // fields produce clear errors instead of silently mis-encoding.
 func TestEncodeLossyOptionsValidation(t *testing.T) {
