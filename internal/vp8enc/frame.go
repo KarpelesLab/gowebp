@@ -1016,21 +1016,10 @@ func (s *encState) estimateBPredSSE(mbx, mby int) int64 {
 					src[j*4+i] = s.frame.Y[(mby*16+sby*4+j)*s.frame.YStride+mbx*16+sbx*4+i]
 				}
 			}
-			tl, top, left, hasTop, hasLeft := s.i4NeighborsFromSource(mbx, mby, sbx, sby)
+			tl, top, left, _, _ := s.i4NeighborsFromSource(mbx, mby, sbx, sby)
 
 			bestSSE := int64(-1)
 			for m := 0; m < NumPredModes; m++ {
-				if !hasTop && (m == ModeI4VE || m == ModeI4RD || m == ModeI4VR ||
-					m == ModeI4LD || m == ModeI4VL) {
-					continue
-				}
-				if !hasLeft && (m == ModeI4HE || m == ModeI4RD || m == ModeI4VR ||
-					m == ModeI4HD || m == ModeI4HU) {
-					continue
-				}
-				if m == ModeI4TM && (!hasTop || !hasLeft) {
-					continue
-				}
 				var pred [16]byte
 				PredictI4(&pred, m, tl, &top, &left)
 				sse := SumSquaredError(src[:], pred[:])
@@ -1177,17 +1166,7 @@ func (s *encState) pickUVMode(mbx, mby int) int {
 
 	best := ModeDC
 	bestSSE := int64(-1)
-	modes := []int{ModeDC, ModeVE, ModeHE, ModeTM}
-	for _, m := range modes {
-		if m == ModeVE && (!cbHasTop || !crHasTop) {
-			continue
-		}
-		if m == ModeHE && (!cbHasLeft || !crHasLeft) {
-			continue
-		}
-		if m == ModeTM && (!cbHasTop || !cbHasLeft || !crHasTop || !crHasLeft) {
-			continue
-		}
+	for _, m := range []int{ModeDC, ModeVE, ModeHE, ModeTM} {
 		var cbPred, crPred [64]byte
 		PredictUV8(&cbPred, m, &cbTop, &cbLeft, cbTL, cbHasTop, cbHasLeft)
 		PredictUV8(&crPred, m, &crTop, &crLeft, crTL, crHasTop, crHasLeft)
