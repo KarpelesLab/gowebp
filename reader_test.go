@@ -26,7 +26,7 @@ func TestImageDecodeRegistration(t *testing.T) {
         t.Fatalf("Encode failed: %v", err)
     }
 
-    img, format, err := image.Decode(buf)
+    _, format, err := image.Decode(buf)
     if err != nil {
         t.Errorf("image.Decode error %v", err)
         return

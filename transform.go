@@ -263,7 +263,7 @@ func applyColorTransform(pixels []color.NRGBA, width, height int) (int, int, int
 }
 
 func applySubtractGreenTransform(pixels []color.NRGBA) {
-    for i, _ := range pixels {
+    for i := range pixels {
         pixels[i].R = pixels[i].R - pixels[i].G
         pixels[i].B = pixels[i].B - pixels[i].G
     }
